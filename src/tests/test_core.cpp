@@ -1,5 +1,7 @@
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 
 #include "browsing_data.hpp"
@@ -7,6 +9,7 @@
 #include "fingerprint.hpp"
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
+#include "perf.hpp"
 #include "privacy.hpp"
 #include "site_rules.hpp"
 #include "url.hpp"
@@ -37,6 +40,7 @@ void expect_eq(const std::string& got, const std::string& want, const char* file
 std::string temp_path(const std::string& name) {
     const char* base = std::getenv("MUSTELA_TEST_TMP");
     std::string dir = (base && *base) ? base : ".";
+    std::filesystem::create_directories(dir);
     return dir + "/mustela_test_" + name;
 }
 
@@ -70,6 +74,10 @@ void test_settings_roundtrip() {
     original.fingerprint_canvas = true;
     original.fingerprint_fonts = true;
     original.fingerprint_referrer = "never";
+    original.process_model = "shared";
+    original.startup_budget_ms = 2500;
+    original.memory_ceiling_mb = 2048;
+    original.perf_log = false;
 
     mustela::save_settings(path, original);
     mustela::Settings loaded = mustela::load_settings(path);
@@ -91,6 +99,10 @@ void test_settings_roundtrip() {
     CHECK(loaded.fingerprint_canvas);
     CHECK(loaded.fingerprint_fonts);
     CHECK_STR(loaded.fingerprint_referrer, "never");
+    CHECK_STR(loaded.process_model, "shared");
+    CHECK(loaded.startup_budget_ms == 2500);
+    CHECK(loaded.memory_ceiling_mb == 2048);
+    CHECK(!loaded.perf_log);
 
     mustela::Settings fallback = mustela::load_settings(path + "_missing");
     CHECK_STR(fallback.homepage, "https://example.org");
@@ -98,6 +110,10 @@ void test_settings_roundtrip() {
     CHECK(fallback.tracking_prevention);
     CHECK(!fallback.fingerprint_webgl);
     CHECK_STR(fallback.fingerprint_referrer, "same-origin");
+    CHECK_STR(fallback.process_model, "per-view");
+    CHECK(fallback.startup_budget_ms == 0);
+    CHECK(fallback.memory_ceiling_mb == 0);
+    CHECK(fallback.perf_log);
 }
 
 void test_settings_partial_file() {
@@ -333,6 +349,96 @@ void test_normalize_url() {
     CHECK_STR(mustela::normalize_url("hello", "https://no.slot.example/"), "https://no.slot.example/");
 }
 
+void test_perf_module() {
+    mustela::SampleStats stats = mustela::stats_from_durations({30, 10, 20});
+    CHECK(stats.count == 3);
+    CHECK(std::fabs(stats.min_ms - 10.0) < 1e-9);
+    CHECK(std::fabs(stats.median_ms - 20.0) < 1e-9);
+    CHECK(std::fabs(stats.max_ms - 30.0) < 1e-9);
+    CHECK(std::fabs(stats.p95_ms - 30.0) < 1e-9);
+
+    stats = mustela::stats_from_durations({10, 20, 30, 40});
+    CHECK(stats.count == 4);
+    CHECK(std::fabs(stats.median_ms - 25.0) < 1e-9);
+    CHECK(std::fabs(stats.p95_ms - 40.0) < 1e-9);
+    CHECK(mustela::stats_from_durations({}).count == 0);
+    CHECK(std::fabs(mustela::stats_from_durations({7.5}).median_ms - 7.5) < 1e-9);
+
+    CHECK(mustela::within_budget(0, 12345.0));
+    CHECK(mustela::within_budget(100, 100.0));
+    CHECK(!mustela::within_budget(100, 100.5));
+    CHECK(mustela::within_budget(-5, 9999.0));
+
+    CHECK(!mustela::ceiling_exceeded(0, 1LL << 30));
+    CHECK(!mustela::ceiling_exceeded(-10, 1LL << 40));
+    CHECK(!mustela::ceiling_exceeded(100, 100LL * 1024 * 1024));
+    CHECK(mustela::ceiling_exceeded(100, 100LL * 1024 * 1024 + 1));
+
+    CHECK_STR(mustela::process_model_name(mustela::process_model_from("shared")), "shared");
+    CHECK_STR(mustela::process_model_name(mustela::process_model_from("per-view")), "per-view");
+    CHECK_STR(mustela::process_model_name(mustela::process_model_from("bogus")), "per-view");
+
+    CHECK(mustela::parse_status_rss_bytes("Name:\twebkit\nVmRSS:\t     1536 kB\n") == 1536 * 1024);
+    CHECK(mustela::parse_status_rss_bytes("VmHWM:\t 10 kB\n") == 0);
+    CHECK(mustela::parse_status_rss_bytes("VmRSS:\t 2 mB\n") == 2LL * 1024 * 1024);
+    CHECK(mustela::parse_status_rss_bytes("VmRSS:\t 1 gB\n") == 1LL * 1024 * 1024 * 1024);
+    CHECK(mustela::parse_status_rss_bytes("VmRSS:\t\n") == 0);
+    CHECK(mustela::parse_status_rss_bytes("") == 0);
+
+    mustela::PerfRecord record;
+    record.kind = "pageload";
+    record.timestamp = 1729000000;
+    record.value_ms = 812.5;
+    record.value_bytes = 0;
+    record.detail = "https://example.org/?a=\"b\"\\c";
+    std::string encoded = mustela::encode_perf_record(record);
+    mustela::PerfRecord decoded;
+    CHECK(mustela::decode_perf_record(encoded, decoded));
+    CHECK_STR(decoded.kind, "pageload");
+    CHECK(decoded.timestamp == 1729000000);
+    CHECK(std::fabs(decoded.value_ms - 812.5) < 0.01);
+    CHECK_STR(decoded.detail, record.detail);
+    CHECK(!mustela::decode_perf_record("garbage", decoded));
+    CHECK(!mustela::decode_perf_record("{\"kind\":\"\",\"ts\":0,\"ms\":0,\"bytes\":0,\"detail\":\"\"}", decoded));
+
+    mustela::PerfRecord memory_record;
+    memory_record.kind = "memory";
+    memory_record.timestamp = 5;
+    memory_record.value_bytes = 734003200;
+    CHECK(mustela::decode_perf_record(mustela::encode_perf_record(memory_record), decoded));
+    CHECK(decoded.value_bytes == 734003200);
+    CHECK_STR(decoded.kind, "memory");
+
+    std::string path = temp_path("perf.jsonl");
+    mustela::PerfLog log(path, 3);
+    for (int i = 0; i < 5; ++i) {
+        mustela::PerfRecord item;
+        item.kind = "startup";
+        item.timestamp = i;
+        item.value_ms = i + 0.5;
+        log.append(item);
+    }
+    std::vector<mustela::PerfRecord> records = mustela::PerfLog(path, 3).read_all();
+    CHECK(records.size() == 3);
+    if (records.size() == 3) {
+        CHECK(records[0].timestamp == 2);
+        CHECK(records[1].timestamp == 3);
+        CHECK(records[2].timestamp == 4);
+        CHECK(std::fabs(records[2].value_ms - 4.5) < 0.01);
+    }
+
+    mustela::Stopwatch watch;
+    CHECK(watch.elapsed_ms() < 1000.0);
+    mustela::LoadTimer timer;
+    CHECK(timer.stop(10.0) < 0.0);
+    timer.start(10.0);
+    CHECK(std::fabs(timer.stop(42.5) - 32.5) < 1e-9);
+    CHECK(!timer.active);
+    timer.start(1.0);
+    timer.cancel();
+    CHECK(timer.stop(5.0) < 0.0);
+}
+
 }
 
 int main() {
@@ -346,6 +452,7 @@ int main() {
     test_fingerprint_policy();
     test_browsing_data_kinds();
     test_normalize_url();
+    test_perf_module();
 
     if (failures > 0) {
         std::fprintf(stderr, "%d/%d checks failed\n", failures, checks);

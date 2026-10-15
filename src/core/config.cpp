@@ -104,6 +104,10 @@ Settings load_settings(const std::string& path) {
     apply(pairs, "privacy.fingerprint_canvas", settings.fingerprint_canvas);
     apply(pairs, "privacy.fingerprint_fonts", settings.fingerprint_fonts);
     apply(pairs, "privacy.fingerprint_referrer", settings.fingerprint_referrer);
+    apply(pairs, "perf.process_model", settings.process_model);
+    apply(pairs, "perf.startup_budget_ms", settings.startup_budget_ms);
+    apply(pairs, "perf.memory_ceiling_mb", settings.memory_ceiling_mb);
+    apply(pairs, "perf.log", settings.perf_log);
     return settings;
 }
 
@@ -130,6 +134,11 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "fingerprint_canvas = " << (settings.fingerprint_canvas ? "true" : "false") << "\n";
     out << "fingerprint_fonts = " << (settings.fingerprint_fonts ? "true" : "false") << "\n";
     out << "fingerprint_referrer = \"" << settings.fingerprint_referrer << "\"\n";
+    out << "\n[perf]\n";
+    out << "process_model = \"" << settings.process_model << "\"\n";
+    out << "startup_budget_ms = " << settings.startup_budget_ms << "\n";
+    out << "memory_ceiling_mb = " << settings.memory_ceiling_mb << "\n";
+    out << "log = " << (settings.perf_log ? "true" : "false") << "\n";
 }
 
 }

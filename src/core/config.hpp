@@ -22,6 +22,10 @@ struct Settings {
     bool fingerprint_canvas = false;
     bool fingerprint_fonts = false;
     std::string fingerprint_referrer = "same-origin";
+    std::string process_model = "per-view";
+    int startup_budget_ms = 0;
+    int memory_ceiling_mb = 0;
+    bool perf_log = true;
 };
 
 Settings load_settings(const std::string& path);
