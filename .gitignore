@@ -1,0 +1,11 @@
+build/
+build-*/
+out/
+install/
+compile_commands.json
+.cache/
+.vs/
+.vscode/
+.idea/
+*.user
+.DS_Store
