@@ -12,6 +12,7 @@
 #include "config.hpp"
 #include "history.hpp"
 #include "privacy.hpp"
+#include "site_rules.hpp"
 #include "tab.hpp"
 
 int mustela_main(int argc, char** argv);
@@ -41,6 +42,14 @@ struct Browser {
     WebKitWebContext* normal_context = nullptr;
     WebKitWebContext* private_context = nullptr;
     std::unique_ptr<mustela::HistoryStore> history;
+    std::unique_ptr<mustela::SiteRules> sites;
+    GtkWidget* rules_window = nullptr;
+    GtkWidget* rules_tree = nullptr;
+    GtkListStore* rules_store = nullptr;
+    GFileMonitor* settings_monitor = nullptr;
+    GFileMonitor* sites_monitor = nullptr;
+    guint settings_reload_pending = 0;
+    guint sites_reload_pending = 0;
     std::vector<std::unique_ptr<Tab>> tabs;
 };
 
@@ -51,6 +60,7 @@ void close_tab(Browser& b, Tab* tab);
 GtkWidget* build_tab_label(Browser& b, Tab* tab);
 void on_close_tab_clicked(GtkButton*, gpointer user_data);
 void open_history_window(Browser& b);
+void open_site_rules_window(Browser& b);
 void clear_browsing_data(Browser& b);
 
 std::string trim_copy(const std::string& s) {
@@ -181,6 +191,38 @@ void clear_browsing_data(Browser& b) {
     }
 }
 
+void apply_view_policy(Browser& b, WebKitWebView* view, const std::string& uri) {
+    if (!b.sites) return;
+    mustela::SiteDecision decision = mustela::resolve_site(b.privacy, *b.sites, uri);
+    WebKitSettings* settings = webkit_web_view_get_settings(view);
+    g_object_set(settings, "enable-javascript", decision.javascript ? TRUE : FALSE, nullptr);
+}
+
+void apply_policies_to_tabs(Browser& b) {
+    for (std::unique_ptr<Tab>& tab : b.tabs) {
+        harden_view(tab->view(), b.privacy.hardening);
+        apply_view_policy(b, tab->view(), tab->uri());
+    }
+}
+
+void on_origin_cookies_removed(GObject* object, GAsyncResult* result, gpointer) {
+    GError* error = nullptr;
+    webkit_website_data_manager_remove_finish(WEBKIT_WEBSITE_DATA_MANAGER(object), result, &error);
+    if (error) g_error_free(error);
+}
+
+void deny_origin_cookies(Browser& b, const std::string& uri) {
+    std::string host = mustela::host_from_uri(uri);
+    if (host.empty()) return;
+    size_t scheme_end = uri.find("://");
+    std::string scheme = scheme_end == std::string::npos ? "https" : uri.substr(0, scheme_end);
+    std::string origin = scheme + "://" + host;
+    GList* origins = g_list_append(nullptr, const_cast<gchar*>(origin.c_str()));
+    WebKitWebsiteDataManager* manager = webkit_web_context_get_website_data_manager(b.normal_context);
+    webkit_website_data_manager_remove(manager, WEBKIT_WEBSITE_DATA_COOKIES, origins, nullptr, on_origin_cookies_removed, nullptr);
+    g_list_free(origins);
+}
+
 std::string normalize_url(const std::string& input, const std::string& search_template) {
     std::string text = trim_copy(input);
     if (text.empty()) return "";
@@ -209,6 +251,8 @@ void on_destroy(GtkWidget*, gpointer) {
         gchar* path = g_build_filename(g_get_user_config_dir(), "mustela", "settings.toml", nullptr);
         mustela::save_settings(path, browser->settings);
         g_free(path);
+        g_clear_object(&browser->settings_monitor);
+        g_clear_object(&browser->sites_monitor);
     }
     gtk_main_quit();
 }
@@ -228,6 +272,10 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
     }
     if (mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && event->keyval == GDK_KEY_Delete) {
         clear_browsing_data(b);
+        return TRUE;
+    }
+    if (mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && event->keyval == GDK_KEY_S) {
+        open_site_rules_window(b);
         return TRUE;
     }
     if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_w) {
@@ -286,6 +334,9 @@ void on_view_progress_changed(GObject* object, GParamSpec*, gpointer) {
 
 void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_data) {
     Tab* tab = static_cast<Tab*>(user_data);
+    if (event == WEBKIT_LOAD_COMMITTED) {
+        apply_view_policy(*browser, tab->view(), tab->uri());
+    }
     if (event == WEBKIT_LOAD_FINISHED) {
         gtk_entry_set_progress_fraction(GTK_ENTRY(browser->url_entry), 0.0);
         if (tab && browser->history) {
@@ -293,6 +344,10 @@ void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_d
             if (!uri.empty() && browser->privacy.records_history(tab->privacy())) {
                 browser->history->record(uri, tab->title(), static_cast<std::int64_t>(std::time(nullptr)));
             }
+        }
+        if (tab && !tab->is_private() && browser->sites) {
+            mustela::SiteDecision decision = mustela::resolve_site(browser->privacy, *browser->sites, tab->uri());
+            if (decision.cookies_denied) deny_origin_cookies(*browser, tab->uri());
         }
     }
     refresh_chrome(*browser);
@@ -379,6 +434,7 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     WebKitWebContext* context = priv ? b.private_context : b.normal_context;
     WebKitWebView* view = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(context));
     harden_view(view, b.privacy.hardening);
+    apply_view_policy(b, view, url ? url : "");
     Tab* tab = new Tab(view, priv);
     tab->set_label(build_tab_label(b, tab));
     b.tabs.emplace_back(tab);
@@ -489,6 +545,218 @@ void open_history_window(Browser& b) {
     gtk_widget_show_all(window);
 }
 
+enum RuleCols {
+    COL_HOST,
+    COL_JS,
+    COL_COOKIES
+};
+
+enum RuleAction {
+    RULE_JS_ALLOW,
+    RULE_JS_DENY,
+    RULE_JS_DEFAULT,
+    RULE_COOKIES_BLOCK,
+    RULE_COOKIES_DEFAULT,
+    RULE_REMOVE
+};
+
+void reload_rules_model(GtkListStore* store) {
+    gtk_list_store_clear(store);
+    if (!browser || !browser->sites) return;
+    for (const mustela::SiteRules::Entry& entry : browser->sites->entries()) {
+        GtkTreeIter iter;
+        gtk_list_store_append(store, &iter);
+        gtk_list_store_set(store, &iter,
+            COL_HOST, entry.host.c_str(),
+            COL_JS, mustela::site_rule_name(entry.policy.javascript),
+            COL_COOKIES, mustela::site_rule_name(entry.policy.cookies), -1);
+    }
+}
+
+std::string current_or_selected_host() {
+    if (browser->rules_tree) {
+        GtkTreeSelection* selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(browser->rules_tree));
+        GtkTreeModel* model = nullptr;
+        GtkTreeIter iter;
+        if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
+            gchar* host = nullptr;
+            gtk_tree_model_get(model, &iter, COL_HOST, &host, -1);
+            std::string out = host ? host : "";
+            g_free(host);
+            if (!out.empty()) return out;
+        }
+    }
+    Tab* tab = active_tab(*browser);
+    return tab ? mustela::host_from_uri(tab->uri()) : "";
+}
+
+void on_rule_action(GtkButton*, gpointer user_data) {
+    if (!browser || !browser->sites) return;
+    RuleAction action = static_cast<RuleAction>(reinterpret_cast<std::intptr_t>(user_data));
+    Browser& b = *browser;
+    std::string host = current_or_selected_host();
+    if (host.empty()) return;
+    if (action == RULE_REMOVE) {
+        b.sites->remove(host);
+    } else {
+        const mustela::SitePolicy* existing = b.sites->find(host);
+        mustela::SitePolicy policy = existing ? *existing : mustela::SitePolicy{};
+        switch (action) {
+            case RULE_JS_ALLOW: policy.javascript = mustela::SiteRule::Allow; break;
+            case RULE_JS_DENY: policy.javascript = mustela::SiteRule::Deny; break;
+            case RULE_JS_DEFAULT: policy.javascript = mustela::SiteRule::Default; break;
+            case RULE_COOKIES_BLOCK: policy.cookies = mustela::SiteRule::Deny; break;
+            case RULE_COOKIES_DEFAULT: policy.cookies = mustela::SiteRule::Default; break;
+            default: break;
+        }
+        b.sites->set(host, policy);
+    }
+    b.sites->save();
+    if (b.rules_store) reload_rules_model(b.rules_store);
+    apply_policies_to_tabs(b);
+}
+
+void on_rules_window_destroy(GtkWidget*, gpointer) {
+    if (browser) {
+        browser->rules_window = nullptr;
+        browser->rules_tree = nullptr;
+        browser->rules_store = nullptr;
+    }
+}
+
+void open_site_rules_window(Browser& b) {
+    if (b.rules_window) {
+        gtk_window_present(GTK_WINDOW(b.rules_window));
+        return;
+    }
+
+    GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    b.rules_window = window;
+    gtk_window_set_title(GTK_WINDOW(window), "Site rules — Mustela");
+    gtk_window_set_default_size(GTK_WINDOW(window), 640, 420);
+    gtk_window_set_transient_for(GTK_WINDOW(window), GTK_WINDOW(b.window));
+    g_signal_connect(window, "destroy", G_CALLBACK(on_rules_window_destroy), nullptr);
+
+    GtkListStore* store = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    b.rules_store = store;
+    reload_rules_model(store);
+
+    GtkWidget* tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    g_object_unref(store);
+    b.rules_tree = tree;
+    gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(tree), TRUE);
+    gtk_tree_selection_set_mode(gtk_tree_view_get_selection(GTK_TREE_VIEW(tree)), GTK_SELECTION_SINGLE);
+
+    GtkCellRenderer* renderer = gtk_cell_renderer_text_new();
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Host", renderer, "text", COL_HOST, nullptr);
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "JavaScript", renderer, "text", COL_JS, nullptr);
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Cookies", renderer, "text", COL_COOKIES, nullptr);
+    gtk_tree_view_column_set_expand(gtk_tree_view_get_column(GTK_TREE_VIEW(tree), COL_HOST), TRUE);
+
+    GtkWidget* scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(scroll), tree);
+
+    struct RuleButton {
+        const char* label;
+        RuleAction action;
+    };
+    const RuleButton buttons[] = {
+        {"JS allow", RULE_JS_ALLOW},
+        {"JS deny", RULE_JS_DENY},
+        {"JS default", RULE_JS_DEFAULT},
+        {"Cookies block", RULE_COOKIES_BLOCK},
+        {"Cookies default", RULE_COOKIES_DEFAULT},
+        {"Remove", RULE_REMOVE}
+    };
+
+    GtkWidget* controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    for (const RuleButton& spec : buttons) {
+        GtkWidget* btn = gtk_button_new_with_label(spec.label);
+        g_signal_connect(btn, "clicked", G_CALLBACK(on_rule_action),
+            reinterpret_cast<gpointer>(static_cast<std::intptr_t>(spec.action)));
+        gtk_box_pack_start(GTK_BOX(controls), btn, FALSE, FALSE, 0);
+    }
+
+    GtkWidget* hint = gtk_label_new("no selection = current site");
+    gtk_label_set_xalign(GTK_LABEL(hint), 1.0f);
+    gtk_box_pack_end(GTK_BOX(controls), hint, FALSE, FALSE, 0);
+
+    GtkWidget* layout = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_container_set_border_width(GTK_CONTAINER(layout), 4);
+    gtk_box_pack_start(GTK_BOX(layout), scroll, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(layout), controls, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(window), layout);
+
+    gtk_widget_show_all(window);
+}
+
+gboolean do_settings_reload(gpointer) {
+    if (!browser) return G_SOURCE_REMOVE;
+    Browser& b = *browser;
+    b.settings_reload_pending = 0;
+
+    gchar* path = g_build_filename(g_get_user_config_dir(), "mustela", "settings.toml", nullptr);
+    b.settings = mustela::load_settings(path);
+    g_free(path);
+    b.privacy = mustela::privacy_from(b.settings);
+
+    apply_cookie_policy(b.normal_context, b.privacy.cookies);
+    WebKitWebsiteDataManager* manager = webkit_web_context_get_website_data_manager(b.normal_context);
+    webkit_website_data_manager_set_itp_enabled(manager, b.privacy.hardening.tracking_prevention ? TRUE : FALSE);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(b.private_toggle), b.privacy.default_private == TabPrivacy::Private);
+
+    if (b.privacy.history_enabled && !b.history) {
+        gchar* profile_dir = g_build_filename(g_get_user_data_dir(), "mustela", "profiles", "default", nullptr);
+        gchar* history_path = g_build_filename(profile_dir, "history.dat", nullptr);
+        b.history = std::make_unique<mustela::HistoryStore>(history_path);
+        g_free(history_path);
+        g_free(profile_dir);
+    }
+
+    apply_policies_to_tabs(b);
+    flash_status("settings reloaded");
+    return G_SOURCE_REMOVE;
+}
+
+void schedule_settings_reload() {
+    if (!browser || browser->settings_reload_pending) return;
+    browser->settings_reload_pending = g_timeout_add(300, do_settings_reload, nullptr);
+}
+
+void on_settings_file_changed(GFileMonitor*, GFile*, GFile*, GFileMonitorEvent, gpointer) {
+    schedule_settings_reload();
+}
+
+gboolean do_sites_reload(gpointer) {
+    if (!browser) return G_SOURCE_REMOVE;
+    Browser& b = *browser;
+    b.sites_reload_pending = 0;
+
+    b.sites->load();
+    apply_policies_to_tabs(b);
+    if (b.rules_store) reload_rules_model(b.rules_store);
+    flash_status("site rules reloaded");
+    return G_SOURCE_REMOVE;
+}
+
+void schedule_sites_reload() {
+    if (!browser || browser->sites_reload_pending) return;
+    browser->sites_reload_pending = g_timeout_add(300, do_sites_reload, nullptr);
+}
+
+void on_sites_file_changed(GFileMonitor*, GFile*, GFile*, GFileMonitorEvent, gpointer) {
+    schedule_sites_reload();
+}
+
+GFileMonitor* monitor_file(const gchar* path, GCallback changed) {
+    GFile* file = g_file_new_for_path(path);
+    GFileMonitor* monitor = g_file_monitor_file(file, G_FILE_MONITOR_NONE, nullptr, nullptr);
+    g_object_unref(file);
+    if (monitor) g_signal_connect(monitor, "changed", changed, nullptr);
+    return monitor;
+}
+
 }
 
 int mustela_main(int argc, char** argv) {
@@ -505,6 +773,17 @@ int mustela_main(int argc, char** argv) {
         mustela::save_settings(config_path, browser->settings);
     }
     browser->privacy = mustela::privacy_from(browser->settings);
+
+    gchar* sites_path = g_build_filename(config_dir, "sites.toml", nullptr);
+    if (!g_file_test(sites_path, G_FILE_TEST_EXISTS)) {
+        mustela::SiteRules initial(sites_path);
+        initial.save();
+    }
+    browser->sites = std::make_unique<mustela::SiteRules>(sites_path);
+    browser->sites->load();
+    browser->settings_monitor = monitor_file(config_path, G_CALLBACK(on_settings_file_changed));
+    browser->sites_monitor = monitor_file(sites_path, G_CALLBACK(on_sites_file_changed));
+    g_free(sites_path);
 
     gchar* profile_dir = g_build_filename(g_get_user_data_dir(), "mustela", "profiles", "default", nullptr);
     g_mkdir_with_parents(profile_dir, 0700);
