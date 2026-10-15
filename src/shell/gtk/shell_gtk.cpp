@@ -3,11 +3,13 @@
 #include <glib/gstdio.h>
 
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "config.hpp"
+#include "history.hpp"
 #include "privacy.hpp"
 #include "tab.hpp"
 
@@ -29,8 +31,11 @@ struct Browser {
     GtkWidget* back_btn = nullptr;
     GtkWidget* forward_btn = nullptr;
     GtkWidget* reload_btn = nullptr;
+    GtkWidget* private_toggle = nullptr;
+    GtkWidget* history_window = nullptr;
     WebKitWebContext* normal_context = nullptr;
     WebKitWebContext* private_context = nullptr;
+    std::unique_ptr<mustela::HistoryStore> history;
     std::vector<std::unique_ptr<Tab>> tabs;
 };
 
@@ -40,6 +45,7 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request);
 void close_tab(Browser& b, Tab* tab);
 GtkWidget* build_tab_label(Browser& b, Tab* tab);
 void on_close_tab_clicked(GtkButton*, gpointer user_data);
+void open_history_window(Browser& b);
 
 std::string trim_copy(const std::string& s) {
     size_t begin = s.find_first_not_of(" \t\r\n");
@@ -150,6 +156,10 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
         gtk_widget_grab_focus(b.url_entry);
         return TRUE;
     }
+    if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_h) {
+        open_history_window(b);
+        return TRUE;
+    }
     if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_r) {
         if (tab) webkit_web_view_reload(tab->view());
         return TRUE;
@@ -192,9 +202,16 @@ void on_view_progress_changed(GObject* object, GParamSpec*, gpointer) {
     gtk_entry_set_progress_fraction(GTK_ENTRY(browser->url_entry), progress >= 1.0 ? 0.0 : progress);
 }
 
-void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer) {
+void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_data) {
+    Tab* tab = static_cast<Tab*>(user_data);
     if (event == WEBKIT_LOAD_FINISHED) {
         gtk_entry_set_progress_fraction(GTK_ENTRY(browser->url_entry), 0.0);
+        if (tab && browser->history) {
+            std::string uri = tab->uri();
+            if (!uri.empty() && browser->privacy.records_history(tab->privacy())) {
+                browser->history->record(uri, tab->title(), static_cast<std::int64_t>(std::time(nullptr)));
+            }
+        }
     }
     refresh_chrome(*browser);
 }
@@ -216,6 +233,12 @@ void on_reload(GtkButton*, gpointer) {
 
 void on_new_tab(GtkButton*, gpointer) {
     open_tab(*browser, browser->settings.homepage.c_str(), browser->privacy.default_private);
+}
+
+void on_private_toggled(GtkToggleButton*, gpointer) {
+    if (!browser) return;
+    bool active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(browser->private_toggle)) != FALSE;
+    browser->privacy.default_private = active ? TabPrivacy::Private : TabPrivacy::Normal;
 }
 
 void on_url_activate(GtkEntry*, gpointer) {
@@ -291,6 +314,98 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     return tab;
 }
 
+enum HistoryCols {
+    COL_TIME,
+    COL_TITLE,
+    COL_URL
+};
+
+std::string format_time(std::int64_t seconds) {
+    GDateTime* dt = g_date_time_new_from_unix_local(seconds);
+    if (!dt) return "";
+    gchar* text = g_date_time_format(dt, "%Y-%m-%d %H:%M");
+    std::string out = text ? text : "";
+    g_date_time_unref(dt);
+    g_free(text);
+    return out;
+}
+
+void on_history_destroy(GtkWidget*, gpointer) {
+    if (browser) browser->history_window = nullptr;
+}
+
+void on_history_row_activated(GtkTreeView* tree, GtkTreePath* path, GtkTreeViewColumn*, gpointer) {
+    GtkTreeModel* model = gtk_tree_view_get_model(tree);
+    GtkTreeIter iter;
+    if (!gtk_tree_model_get_iter(model, &iter, path)) return;
+    gchar* url = nullptr;
+    gtk_tree_model_get(model, &iter, COL_URL, &url, -1);
+    if (url && *url) open_tab(*browser, url, browser->privacy.default_private);
+    g_free(url);
+}
+
+void on_history_clear(GtkButton*, gpointer user_data) {
+    if (browser->history) browser->history->clear();
+    GtkTreeView* tree = GTK_TREE_VIEW(user_data);
+    GtkListStore* store = GTK_LIST_STORE(gtk_tree_view_get_model(tree));
+    gtk_list_store_clear(store);
+}
+
+void open_history_window(Browser& b) {
+    if (b.history_window) {
+        gtk_window_present(GTK_WINDOW(b.history_window));
+        return;
+    }
+
+    GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    b.history_window = window;
+    gtk_window_set_title(GTK_WINDOW(window), "History — Mustela");
+    gtk_window_set_default_size(GTK_WINDOW(window), 720, 480);
+    gtk_window_set_transient_for(GTK_WINDOW(window), GTK_WINDOW(b.window));
+    g_signal_connect(window, "destroy", G_CALLBACK(on_history_destroy), nullptr);
+
+    GtkListStore* store = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    if (b.history) {
+        for (const mustela::HistoryEntry& entry : b.history->recent(500)) {
+            GtkTreeIter iter;
+            gtk_list_store_append(store, &iter);
+            gtk_list_store_set(store, &iter,
+                COL_TIME, format_time(entry.visited_at).c_str(),
+                COL_TITLE, entry.title.c_str(),
+                COL_URL, entry.url.c_str(), -1);
+        }
+    }
+
+    GtkWidget* tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    g_object_unref(store);
+    gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(tree), TRUE);
+
+    GtkCellRenderer* renderer = gtk_cell_renderer_text_new();
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "When", renderer, "text", COL_TIME, nullptr);
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Title", renderer, "text", COL_TITLE, nullptr);
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "URL", renderer, "text", COL_URL, nullptr);
+    gtk_tree_view_column_set_expand(gtk_tree_view_get_column(GTK_TREE_VIEW(tree), COL_TITLE), TRUE);
+    g_signal_connect(tree, "row-activated", G_CALLBACK(on_history_row_activated), nullptr);
+
+    GtkWidget* scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(scroll), tree);
+
+    GtkWidget* clear_btn = gtk_button_new_with_label("Clear history");
+    g_signal_connect(clear_btn, "clicked", G_CALLBACK(on_history_clear), tree);
+
+    GtkWidget* bottom = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_pack_end(GTK_BOX(bottom), clear_btn, FALSE, FALSE, 0);
+
+    GtkWidget* layout = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_container_set_border_width(GTK_CONTAINER(layout), 4);
+    gtk_box_pack_start(GTK_BOX(layout), scroll, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(layout), bottom, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(window), layout);
+
+    gtk_widget_show_all(window);
+}
+
 }
 
 int mustela_main(int argc, char** argv) {
@@ -310,6 +425,12 @@ int mustela_main(int argc, char** argv) {
 
     gchar* profile_dir = g_build_filename(g_get_user_data_dir(), "mustela", "profiles", "default", nullptr);
     g_mkdir_with_parents(profile_dir, 0700);
+
+    if (browser->privacy.history_enabled) {
+        gchar* history_path = g_build_filename(profile_dir, "history.dat", nullptr);
+        browser->history = std::make_unique<mustela::HistoryStore>(history_path);
+        g_free(history_path);
+    }
 
     WebKitWebsiteDataManager* data_manager =
         webkit_website_data_manager_new("base-data-directory", profile_dir, nullptr);
@@ -340,6 +461,8 @@ int mustela_main(int argc, char** argv) {
     browser->back_btn = gtk_button_new_from_icon_name("go-previous-symbolic", GTK_ICON_SIZE_BUTTON);
     browser->forward_btn = gtk_button_new_from_icon_name("go-next-symbolic", GTK_ICON_SIZE_BUTTON);
     browser->reload_btn = gtk_button_new_from_icon_name("view-refresh-symbolic", GTK_ICON_SIZE_BUTTON);
+    browser->private_toggle = gtk_toggle_button_new_with_label("Private");
+    gtk_widget_set_tooltip_text(browser->private_toggle, "New tabs open in private mode");
     browser->url_entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(browser->url_entry), "Search or enter address");
     GtkWidget* new_tab_btn = gtk_button_new_from_icon_name("tab-new-symbolic", GTK_ICON_SIZE_BUTTON);
@@ -349,11 +472,14 @@ int mustela_main(int argc, char** argv) {
         gtk_button_set_relief(GTK_BUTTON(btn), GTK_RELIEF_NONE);
         gtk_widget_set_focus_on_click(btn, FALSE);
     }
+    gtk_button_set_relief(GTK_BUTTON(browser->private_toggle), GTK_RELIEF_NONE);
+    gtk_widget_set_focus_on_click(browser->private_toggle, FALSE);
     gtk_widget_set_hexpand(browser->url_entry, TRUE);
 
     gtk_box_pack_start(GTK_BOX(toolbar), browser->back_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), browser->forward_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), browser->reload_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(toolbar), browser->private_toggle, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), browser->url_entry, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), new_tab_btn, FALSE, FALSE, 0);
 
@@ -369,12 +495,16 @@ int mustela_main(int argc, char** argv) {
     g_signal_connect(browser->back_btn, "clicked", G_CALLBACK(on_go_back), nullptr);
     g_signal_connect(browser->forward_btn, "clicked", G_CALLBACK(on_go_forward), nullptr);
     g_signal_connect(browser->reload_btn, "clicked", G_CALLBACK(on_reload), nullptr);
+    g_signal_connect(browser->private_toggle, "toggled", G_CALLBACK(on_private_toggled), nullptr);
     g_signal_connect(new_tab_btn, "clicked", G_CALLBACK(on_new_tab), nullptr);
     g_signal_connect(browser->url_entry, "activate", G_CALLBACK(on_url_activate), nullptr);
     g_signal_connect(browser->notebook, "switch-page", G_CALLBACK(on_switch_page), nullptr);
     g_signal_connect(browser->notebook, "page-removed", G_CALLBACK(on_page_removed), nullptr);
 
     TabPrivacy request = start_private ? TabPrivacy::Private : browser->privacy.default_private;
+    if (request == TabPrivacy::Private) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(browser->private_toggle), TRUE);
+    }
     open_tab(*browser, url && *url ? url : browser->settings.homepage.c_str(), request);
 
     gtk_widget_show_all(window);

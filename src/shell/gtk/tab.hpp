@@ -3,6 +3,8 @@
 #include <gtk/gtk.h>
 #include <string>
 
+#include "privacy.hpp"
+
 namespace mustela {
 
 class Tab {
@@ -17,6 +19,7 @@ public:
     GtkWidget* label() const { return label_; }
     void set_label(GtkWidget* label) { label_ = label; }
     bool is_private() const { return private_; }
+    TabPrivacy privacy() const { return private_ ? TabPrivacy::Private : TabPrivacy::Normal; }
 
     std::string uri() const;
     std::string title() const;
