@@ -32,13 +32,13 @@ Milestones are capability-based; dates are intentionally not assigned.
 - Settings hot-reload on file change. (done)
 - Per-site overrides: `sites.toml`, JavaScript allow/deny, cookie deny with origin wipe, subdomain matching, `resolve_site` in the core, site-rules window in the shell. (done)
 
-## M2.5 — Fingerprint budget (next)
+## M2.5 — Fingerprint budget (done)
 
-- Switches for WebGL, canvas, remote fonts and referrer trimming.
-- A measurable fingerprint budget: document which combinations reduce uniqueness and by how much.
-- Per-site extension of the fingerprint policy on top of `SiteRules`.
+- Switches for WebGL, canvas readback, remote fonts and referrer trimming, enforced through user scripts and a compiled content filter. (done)
+- A measurable fingerprint budget documented in PRIVACY.md: surface-by-surface trade-offs, presets and honest limits. (done)
+- Per-site fingerprint rules on top of `SiteRules`: `allow` exempts a host, `deny` forces the strict set. (done)
 
-## M3 — Windows port
+## M3 — Windows port (next)
 
 - WinCairo build scripted end-to-end from a clean machine.
 - Shell and privacy-core parity with the GTK port.

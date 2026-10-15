@@ -50,8 +50,12 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | privacy.hyperlink_auditing | false | allow `<a ping>` link auditing |
 | privacy.dns_prefetching | false | speculative DNS lookups |
 | privacy.block_autoplay | true | media playback requires a user gesture |
+| privacy.fingerprint_webgl | false | `canvas.getContext('webgl*')` returns null — WebGL surfaces disappear |
+| privacy.fingerprint_canvas | false | canvas readbacks (`toDataURL`, `toBlob`, `getImageData`, `readPixels`) return blank data |
+| privacy.fingerprint_fonts | false | block every remote font download |
+| privacy.fingerprint_referrer | same-origin | `off`, `same-origin` (no cross-origin Referer) or `no-referrer` |
 
-Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead.
+Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead. The compiled remote-font filter is cached under the same profile in `filters/`.
 
 Both `settings.toml` and `sites.toml` are watched while the browser runs — edits apply to open tabs without a restart.
 
@@ -65,9 +69,12 @@ javascript = "deny"
 
 [tracker.example.org]
 cookies = "deny"
+
+[maps.example.com]
+fingerprint = "allow"
 ```
 
-A rule for a domain covers its subdomains (`example.org` matches `www.example.org`). The same rules are editable at runtime in the site-rules window (`Ctrl+Shift+S`): buttons act on the selected row, or on the current site when nothing is selected.
+A rule for a domain covers its subdomains (`example.org` matches `www.example.org`). The same rules are editable at runtime in the site-rules window (`Ctrl+Shift+S`): buttons act on the selected row, or on the current site when nothing is selected. `fingerprint = "allow"` exempts the site from all fingerprint switches (use for maps, games, canvas apps); `fingerprint = "deny"` forces the strict set on it.
 
 ## Shortcuts
 

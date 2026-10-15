@@ -3,7 +3,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-17-00599C)
-![status](https://img.shields.io/badge/status-M2_complete-e0a03d)
+![status](https://img.shields.io/badge/status-M2.5_fp_budget-e0a03d)
 
 Приватный кроссплатформенный браузерный движок на базе WebKit.
 
@@ -19,7 +19,7 @@ English version: [README.md](README.md)
 
 ## Статус
 
-`v0.5.0` — ядро приватности готово: политика куки, Intelligent Tracking Prevention, hardening-переключатели, очистка browsing-data, per-site overrides (`sites.toml` с JavaScript allow/deny и запретом куки, покрытием поддоменов) и hot-reload — правки политик применяются к открытым вкладкам на лету. `resolve_site` в ядре — тот самый API, которым будет управлять браузер [Kiwi](https://github.com/mel0k1/Kiwi).
+`v0.6.0` — ядро приватности дополнено fingerprint-бюджетом: переключатели WebGL, чтения канваса, удалённых шрифтов и обрезки referrer (user scripts плюс скомпилированный content filter WebKit — апстрим-API, без патчей), документированный бюджет по каждой поверхности в [PRIVACY.md](docs/PRIVACY.md) и per-site правила фингерпринта в `sites.toml` (`allow` освобождает сайт, `deny` включает строгий набор). Политика куки, ITP, hardening-переключатели, очистка browsing-data, per-site overrides и hot-reload из v0.5 остаются основой. `resolve_site` в ядре — тот самый API, которым будет управлять браузер [Kiwi](https://github.com/mel0k1/Kiwi).
 
 Куда всё движется — в [дорожной карте](docs/ROADMAP.md).
 
@@ -46,7 +46,7 @@ sudo apt install build-essential cmake pkg-config libwebkit2gtk-4.1-dev
 ## Структура
 
 ```
-src/core/        настройки, политика приватности, правила сайтов, модели browsing-data (переносимое ядро без UI-зависимостей)
+src/core/        настройки, политика приватности, правила сайтов, fingerprint-бюджет, модели browsing-data (переносимое ядро без UI-зависимостей)
 src/shell/       оболочка-эмбеддер, по каталогу на порт
 src/shell/gtk/   порт Linux (WebKitGTK)
 src/shell/win/   порт Windows (WinCairo, в работе)

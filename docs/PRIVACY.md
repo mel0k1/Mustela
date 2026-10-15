@@ -10,7 +10,7 @@ Privacy in Mustela is a configuration surface, not a slogan. The long-term rule:
 4. **Fingerprint surface is a budget.** Settings that reduce uniqueness — fonts, WebGL, canvas, timezone exposure — are documented, combinable and measurable.
 5. **User data is local.** Profiles, history and settings live on disk in open formats. No cloud sync unless the user builds it themselves.
 
-## Current state (v0.4)
+## Current state (v0.6)
 
 - Default mode is normal browsing: privacy is off unless asked for.
 - The default profile is Mustela-owned and persistent under `~/.local/share/mustela/profiles/default`, never in WebKit's system location.
@@ -42,6 +42,44 @@ Applied to every web view at creation time:
 | `privacy.dns_prefetching` | false | `enable-dns-prefetching` — no speculative DNS traffic |
 | `privacy.block_autoplay` | true | `media-playback-requires-user-gesture` |
 
+### Fingerprint budget
+
+Fingerprinting reads what a browser exposes: which rendering APIs answer, which fonts arrive, what a canvas round-trip returns, which URL the previous page leaked. Each switch below removes one entropy source and costs one class of compatibility — the budget is this trade-off table, not a marketing number.
+
+| Setting | Default | Removes | Costs |
+|---------|---------|---------|-------|
+| `privacy.fingerprint_webgl` | false | `canvas.getContext('webgl*')` returns null — no GPU model, no renderer strings, no WebGL canvas hashing | WebGL maps, games and 3D viewers break |
+| `privacy.fingerprint_canvas` | false | canvas readbacks return blank data: `toDataURL`/`toBlob` render an empty canvas of the same size, `getImageData` and `readPixels` come back zeroed | canvas exports become empty; page pixels are not recoverable |
+| `privacy.fingerprint_fonts` | false | every remote font download is blocked (compiled WebKit content filter, resource type `font`) | typography falls back to system fonts and pages look different |
+| `privacy.fingerprint_referrer` | `same-origin` | cross-origin navigations and subresources carry no Referer; `no-referrer` removes it everywhere including same-site | hotlink-protected images and referrer-checked flows may break |
+
+Reference presets, also exposed in the core as `fingerprint_preset()` for a future UI:
+
+| Preset | Meaning |
+|--------|---------|
+| `off` | all four switches off |
+| `standard` | referrer trimming only — the default |
+| `strict` | everything blocked, referrer `no-referrer` |
+
+Mechanics, without WebKit patches:
+
+- WebGL and canvas defenses are user scripts injected at document start into every frame through `WebKitUserContentManager` — the same injection path a content blocker uses. Patched functions report themselves as native (`function toDataURL() { [native code] }`), but a determined script can still detect the patch; masking is best-effort, not invisibility.
+- Remote fonts are blocked with a compiled `WebKitUserContentFilter`, not a CSS hack — the request never happens.
+- Referrer trimming injects a `meta name="referrer"` tag ahead of the page's own head, so it wins tree-order against the page's meta; a `Content-Security-Policy: referrer` directive on the page still beats meta injection.
+- Blocking remote fonts hides font downloads, not the list of installed fonts: text-metric probing still measures system fonts. The budget is additive, not absolute — stacking switches removes sources, not the whole fingerprint.
+
+Per-site rules extend the budget: `fingerprint = "allow"` exempts a host (for maps, games, canvas apps that legitimately need the surface) and `fingerprint = "deny"` forces the strict set on it regardless of the global switches.
+
+```toml
+[maps.example.com]
+fingerprint = "allow"
+
+[suspicious.example]
+fingerprint = "deny"
+```
+
+The status label shows `fp` whenever any fingerprint defense is active globally.
+
 ### Clearing browsing data
 
 `Ctrl+Shift+Del` clears cookies, memory and disk cache, local/session storage and IndexedDB for both contexts at once. The kinds live in the core as `DataKind` flags and `ClearRequest`, so a future UI can offer granular clear with a time range.
@@ -56,6 +94,9 @@ javascript = "deny"
 
 [tracker.example.org]
 cookies = "deny"
+
+[maps.example.com]
+fingerprint = "allow"
 ```
 
 - JavaScript supports `allow` and `deny`; the site rule wins over `privacy.javascript`.
@@ -74,9 +115,9 @@ History is stored by the core (`HistoryStore`) inside the default profile. Priva
 ### What stays constant
 
 - The shell toolbar has a Private toggle that switches the default for new tabs at runtime; it is session-scoped and never persisted.
-- The status label in the toolbar shows the active policy: current tab mode, cookie policy and ITP state.
+- The status label in the toolbar shows the active policy: current tab mode, cookie policy, ITP and fingerprint state.
 - No telemetry exists anywhere in the codebase, and this bullet is enforced by review.
 
 ## Next steps
 
-Fingerprint-surface switches (WebGL, canvas, remote fonts, referrer trimming) with a measurable budget — see stage M2.5 of the [roadmap](ROADMAP.md).
+Windows parity and performance budgets — see the [roadmap](ROADMAP.md).
