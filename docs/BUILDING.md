@@ -27,9 +27,36 @@ Run:
 
 ```bash
 ./build/mustela                    # persistent profile
-./build/mustela --private          # ephemeral in-memory profile
+./build/mustela --private          # first tab private, ephemeral profile
 ./build/mustela https://example.org
 ```
+
+## Configuration
+
+Settings live in `~/.config/mustela/settings.toml`, created on first run and saved on exit.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| shell.homepage | https://example.org | start page for new tabs |
+| shell.search_template | https://duckduckgo.com/?q=%s | `%s` is replaced with the query |
+| shell.window_width | 1280 | window width, updated on exit |
+| shell.window_height | 800 | window height, updated on exit |
+| privacy.private_tabs_enabled | true | allow private tabs at all |
+| privacy.start_in_private | false | open new tabs in private mode by default |
+
+Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead.
+
+## Shortcuts
+
+| Keys | Action |
+|------|--------|
+| Ctrl+T | new tab |
+| Ctrl+Shift+P | new private tab |
+| Ctrl+W | close tab |
+| Ctrl+L | focus the address bar |
+| Ctrl+R / F5 | reload |
+| Alt+Left / Alt+Right | back / forward |
+| Escape | stop loading |
 
 ## Windows (in progress)
 

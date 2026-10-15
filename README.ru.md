@@ -3,7 +3,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-17-00599C)
-![status](https://img.shields.io/badge/status-bootstrap-d95f5f)
+![status](https://img.shields.io/badge/status-M1%20tabbed%20shell-e0a03d)
 
 Приватный кроссплатформенный браузерный движок на базе WebKit.
 
@@ -19,7 +19,7 @@ English version: [README.md](README.md)
 
 ## Статус
 
-`v0.1.0` — бутстрап. Минимальная оболочка, открывающая web-view на Linux; порт под Windows пока заготовка и появится следующим шагом.
+`v0.2.0` — оболочка с табами. Табы, адресная строка с поиском, назад/вперёд/перезагрузка, собственный каталог профиля Mustela и TOML-файл настроек с зачатком политики приватности: приватные табы — по явному запросу и выключены по умолчанию. Порт под Windows пока заготовка и появится следующим шагом.
 
 Куда всё движется — в [дорожной карте](docs/ROADMAP.md).
 
@@ -42,6 +42,7 @@ sudo apt install build-essential cmake pkg-config libwebkit2gtk-4.1-dev
 ## Структура
 
 ```
+src/core/        настройки и политика приватности (переносимое ядро без UI-зависимостей)
 src/shell/       оболочка-эмбеддер, по каталогу на порт
 src/shell/gtk/   порт Linux (WebKitGTK)
 src/shell/win/   порт Windows (WinCairo, в работе)

@@ -8,12 +8,14 @@ Milestones are capability-based; dates are intentionally not assigned.
 - `mustela` shell: GTK port opens a web view, `--private` runs an ephemeral profile.
 - Windows port stub, build docs for both platforms.
 
-## M1 — Shell baseline
+## M1 — Shell baseline (current)
 
-- Navigation: back, forward, reload, URL bar, loading state.
-- Basic tab model.
-- Mustela-owned profile directory, separate from system defaults.
-- Settings file (TOML) loaded at startup and watched for changes.
+- Navigation: back, forward, reload, URL bar, loading progress. (done)
+- Search fallback for non-URL input. (done)
+- Basic tab model: open, close, switch, private tabs behind policy. (done)
+- Mustela-owned profile directory, separate from system defaults. (done)
+- Settings file (TOML) loaded at startup, saved on exit. (done)
+- Settings hot-reload on file change. (next)
 
 ## M2 — Privacy core
 

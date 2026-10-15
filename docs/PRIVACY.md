@@ -10,10 +10,12 @@ Privacy in Mustela is a configuration surface, not a slogan. The long-term rule:
 4. **Fingerprint surface is a budget.** Settings that reduce uniqueness — fonts, WebGL, canvas, timezone exposure — are documented, combinable and measurable.
 5. **User data is local.** Profiles, history and settings live on disk in open formats. No cloud sync unless the user builds it themselves.
 
-## Current state (v0.1)
+## Current state (v0.2)
 
-- `--private` flag: ephemeral WebKit context, nothing is persisted.
-- Default context writes under the standard WebKitGTK user directory.
+- Default mode is normal browsing: privacy is off unless asked for.
+- The default profile is Mustela-owned and persistent under `~/.local/share/mustela/profiles/default`, never in WebKit's system location.
+- Private tabs are opt-in: `Ctrl+Shift+P` opens one, `--private` on the command line makes the first tab private. Private tabs run in a shared ephemeral WebKit context — cookies, cache and storage stay in memory and die with the process.
+- The policy lives in `~/.config/mustela/settings.toml`: `privacy.private_tabs_enabled` gates private tabs entirely, `privacy.start_in_private` flips the default. Both are read through `PrivacyPolicy` in the core; the shell only asks the policy.
 - No telemetry exists anywhere in the codebase, and this bullet is enforced by review.
 
 ## Next steps

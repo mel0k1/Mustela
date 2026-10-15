@@ -8,7 +8,7 @@ Mustela is a thin, opinionated layer over WebKit. The engine core is upstream We
 +-----------------------------+
 | mustela-browser (UI)        |   planned: the full browser product
 +-----------------------------+
-| mustela-core                |   planned: settings, privacy policies, profiles
+| mustela-core                |   today: settings, privacy policy; later: profiles, per-site rules
 +-----------------------------+
 | mustela-shell               |   today: embedder shell, one port per platform
 +-----------------------------+
@@ -18,12 +18,14 @@ Mustela is a thin, opinionated layer over WebKit. The engine core is upstream We
 
 ## Ports
 
-| Port | Platform | WebKit flavor  | Status  |
-|------|----------|----------------|---------|
-| gtk  | Linux    | WebKitGTK 2.4x | working |
-| win  | Windows  | WinCairo       | stub    |
+| Port | Platform | WebKit flavor  | Status                    |
+|------|----------|----------------|---------------------------|
+| gtk  | Linux    | WebKitGTK 2.4x | working — tabs, url bar   |
+| win  | Windows  | WinCairo       | stub                      |
 
 Each port lives in its own directory under `src/shell/` and exposes the same entry point (`mustela_main`). Platform selection happens in CMake at configure time, so port sources are never mixed in one build.
+
+`mustela-core` is plain C++17 with no UI or WebKit dependencies: both ports link it, and it stays unit-testable. Privacy decisions go through `PrivacyPolicy` in the core — a port never decides privacy on its own, it only asks.
 
 ## WebKit dependency strategy
 
