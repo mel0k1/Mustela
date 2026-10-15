@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "site_rules.hpp"
+
 namespace mustela {
 
 struct Settings;
@@ -45,5 +47,12 @@ struct PrivacyPolicy {
 CookiePolicy cookie_policy_from(const std::string& name);
 const char* cookie_policy_name(CookiePolicy policy);
 PrivacyPolicy privacy_from(const Settings& settings);
+
+struct SiteDecision {
+    bool javascript = true;
+    bool cookies_denied = false;
+};
+
+SiteDecision resolve_site(const PrivacyPolicy& policy, const SiteRules& rules, const std::string& uri);
 
 }

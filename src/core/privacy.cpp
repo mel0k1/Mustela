@@ -35,4 +35,14 @@ PrivacyPolicy privacy_from(const Settings& settings) {
     return policy;
 }
 
+SiteDecision resolve_site(const PrivacyPolicy& policy, const SiteRules& rules, const std::string& uri) {
+    SitePolicy site = rules.policy_for(host_from_uri(uri));
+    SiteDecision decision;
+    decision.javascript = policy.hardening.javascript;
+    if (site.javascript == SiteRule::Allow) decision.javascript = true;
+    if (site.javascript == SiteRule::Deny) decision.javascript = false;
+    decision.cookies_denied = site.cookies == SiteRule::Deny;
+    return decision;
+}
+
 }
