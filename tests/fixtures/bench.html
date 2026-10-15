@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mustela bench fixture</title>
+<style>
+  body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: #222; background: #fafafa; }
+  header { padding: 12px 20px; background: #2f4f4f; color: #fff; }
+  main { padding: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .card { padding: 16px; background: #fff; border: 1px solid #ddd; border-radius: 6px; }
+</style>
+</head>
+<body>
+<header><h1>Mustela bench fixture</h1></header>
+<main>
+  <p>Local page for page-load benchmarks. No network requests, no external fonts.</p>
+  <div class="grid" id="grid"></div>
+</main>
+<script>
+(function () {
+  var grid = document.getElementById("grid");
+  for (var i = 0; i < 24; i++) {
+    var card = document.createElement("div");
+    card.className = "card";
+    card.textContent = "Card " + (i + 1);
+    grid.appendChild(card);
+  }
+  document.title = "Mustela bench fixture loaded";
+})();
+</script>
+</body>
+</html>
