@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "browsing_data.hpp"
 #include "config.hpp"
 #include "history.hpp"
 #include "privacy.hpp"
@@ -17,6 +18,9 @@ int mustela_main(int argc, char** argv);
 
 namespace {
 
+using mustela::CookiePolicy;
+using mustela::DataKind;
+using mustela::Hardening;
 using mustela::PrivacyPolicy;
 using mustela::Settings;
 using mustela::Tab;
@@ -32,6 +36,7 @@ struct Browser {
     GtkWidget* forward_btn = nullptr;
     GtkWidget* reload_btn = nullptr;
     GtkWidget* private_toggle = nullptr;
+    GtkWidget* status_label = nullptr;
     GtkWidget* history_window = nullptr;
     WebKitWebContext* normal_context = nullptr;
     WebKitWebContext* private_context = nullptr;
@@ -46,6 +51,7 @@ void close_tab(Browser& b, Tab* tab);
 GtkWidget* build_tab_label(Browser& b, Tab* tab);
 void on_close_tab_clicked(GtkButton*, gpointer user_data);
 void open_history_window(Browser& b);
+void clear_browsing_data(Browser& b);
 
 std::string trim_copy(const std::string& s) {
     size_t begin = s.find_first_not_of(" \t\r\n");
@@ -88,6 +94,16 @@ void update_window_title(Browser& b) {
     gtk_window_set_title(GTK_WINDOW(b.window), (tab->title() + " — Mustela").c_str());
 }
 
+void refresh_status(Browser& b) {
+    if (!b.status_label) return;
+    Tab* tab = active_tab(b);
+    std::string text;
+    if (tab && tab->is_private()) text = "private · ";
+    text += std::string("cookies ") + mustela::cookie_policy_name(b.privacy.cookies);
+    if (b.privacy.hardening.tracking_prevention) text += " · itp";
+    gtk_label_set_text(GTK_LABEL(b.status_label), text.c_str());
+}
+
 void refresh_chrome(Browser& b) {
     Tab* tab = active_tab(b);
     if (tab) {
@@ -101,6 +117,68 @@ void refresh_chrome(Browser& b) {
     }
     gtk_notebook_set_show_tabs(GTK_NOTEBOOK(b.notebook), gtk_notebook_get_n_pages(GTK_NOTEBOOK(b.notebook)) > 1);
     update_window_title(b);
+    refresh_status(b);
+}
+
+gboolean restore_status(gpointer) {
+    refresh_chrome(*browser);
+    return G_SOURCE_REMOVE;
+}
+
+void flash_status(const char* text) {
+    if (!browser->status_label) return;
+    gtk_label_set_text(GTK_LABEL(browser->status_label), text);
+    g_timeout_add_seconds(3, restore_status, nullptr);
+}
+
+void apply_cookie_policy(WebKitWebContext* context, CookiePolicy policy) {
+    WebKitCookieManager* manager = webkit_web_context_get_cookie_manager(context);
+    WebKitCookieAcceptPolicy accept = WEBKIT_COOKIE_POLICY_ACCEPT_NO_THIRD_PARTY;
+    if (policy == CookiePolicy::Always) accept = WEBKIT_COOKIE_POLICY_ACCEPT_ALWAYS;
+    if (policy == CookiePolicy::Never) accept = WEBKIT_COOKIE_POLICY_ACCEPT_NEVER;
+    webkit_cookie_manager_set_accept_policy(manager, accept);
+}
+
+void harden_view(WebKitWebView* view, const Hardening& hard) {
+    WebKitSettings* settings = webkit_web_view_get_settings(view);
+    g_object_set(settings,
+        "enable-javascript", hard.javascript ? TRUE : FALSE,
+        "enable-hyperlink-auditing", hard.hyperlink_auditing ? TRUE : FALSE,
+        "enable-dns-prefetching", hard.dns_prefetching ? TRUE : FALSE,
+        "media-playback-requires-user-gesture", hard.autoplay_blocked ? TRUE : FALSE,
+        nullptr);
+}
+
+guint webkit_data_types(DataKind kinds) {
+    guint types = 0;
+    if (mustela::has(kinds, DataKind::Cookies)) types |= WEBKIT_WEBSITE_DATA_COOKIES;
+    if (mustela::has(kinds, DataKind::Cache)) types |= WEBKIT_WEBSITE_DATA_MEMORY_CACHE | WEBKIT_WEBSITE_DATA_DISK_CACHE;
+    if (mustela::has(kinds, DataKind::LocalStorage)) types |= WEBKIT_WEBSITE_DATA_LOCAL_STORAGE | WEBKIT_WEBSITE_DATA_SESSION_STORAGE;
+    if (mustela::has(kinds, DataKind::IndexedDB)) types |= WEBKIT_WEBSITE_DATA_INDEXEDDB;
+    return types;
+}
+
+void on_data_cleared(GObject* object, GAsyncResult* result, gpointer) {
+    GError* error = nullptr;
+    webkit_website_data_manager_clear_finish(WEBKIT_WEBSITE_DATA_MANAGER(object), result, &error);
+    if (error) {
+        g_error_free(error);
+        return;
+    }
+    flash_status("browsing data cleared");
+}
+
+void clear_browsing_data(Browser& b) {
+    mustela::ClearRequest request;
+    WebKitWebsiteDataTypes types = static_cast<WebKitWebsiteDataTypes>(webkit_data_types(request.kinds));
+    GTimeSpan max_age = static_cast<GTimeSpan>(request.max_age_seconds);
+    WebKitWebsiteDataManager* managers[] = {
+        webkit_web_context_get_website_data_manager(b.normal_context),
+        webkit_web_context_get_website_data_manager(b.private_context)
+    };
+    for (WebKitWebsiteDataManager* manager : managers) {
+        webkit_website_data_manager_clear(manager, types, max_age, nullptr, on_data_cleared, nullptr);
+    }
 }
 
 std::string normalize_url(const std::string& input, const std::string& search_template) {
@@ -146,6 +224,10 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
     }
     if (mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && event->keyval == GDK_KEY_P) {
         open_tab(b, b.settings.homepage.c_str(), TabPrivacy::Private);
+        return TRUE;
+    }
+    if (mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && event->keyval == GDK_KEY_Delete) {
+        clear_browsing_data(b);
         return TRUE;
     }
     if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_w) {
@@ -296,6 +378,7 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     bool priv = b.privacy.tab_privacy(request) == TabPrivacy::Private;
     WebKitWebContext* context = priv ? b.private_context : b.normal_context;
     WebKitWebView* view = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(context));
+    harden_view(view, b.privacy.hardening);
     Tab* tab = new Tab(view, priv);
     tab->set_label(build_tab_label(b, tab));
     b.tabs.emplace_back(tab);
@@ -434,9 +517,13 @@ int mustela_main(int argc, char** argv) {
 
     WebKitWebsiteDataManager* data_manager =
         webkit_website_data_manager_new("base-data-directory", profile_dir, nullptr);
+    webkit_website_data_manager_set_itp_enabled(data_manager,
+        browser->privacy.hardening.tracking_prevention ? TRUE : FALSE);
     browser->normal_context = webkit_web_context_new_with_website_data_manager(data_manager);
     g_object_unref(data_manager);
     browser->private_context = webkit_web_context_new_ephemeral();
+    apply_cookie_policy(browser->normal_context, browser->privacy.cookies);
+    apply_cookie_policy(browser->private_context, browser->privacy.cookies);
 
     const char* url = nullptr;
     bool start_private = false;
@@ -465,6 +552,13 @@ int mustela_main(int argc, char** argv) {
     gtk_widget_set_tooltip_text(browser->private_toggle, "New tabs open in private mode");
     browser->url_entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(browser->url_entry), "Search or enter address");
+    browser->status_label = gtk_label_new("");
+    gtk_label_set_xalign(GTK_LABEL(browser->status_label), 1.0f);
+    gtk_widget_set_margin_start(browser->status_label, 6);
+    gtk_widget_set_margin_end(browser->status_label, 6);
+    gtk_widget_set_valign(browser->status_label, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(browser->status_label,
+        "Cookie policy and tracking prevention. Ctrl+Shift+Del clears browsing data");
     GtkWidget* new_tab_btn = gtk_button_new_from_icon_name("tab-new-symbolic", GTK_ICON_SIZE_BUTTON);
 
     GtkWidget* toolbar_buttons[] = {browser->back_btn, browser->forward_btn, browser->reload_btn, new_tab_btn};
@@ -482,6 +576,7 @@ int mustela_main(int argc, char** argv) {
     gtk_box_pack_start(GTK_BOX(toolbar), browser->private_toggle, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), browser->url_entry, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), new_tab_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(toolbar), browser->status_label, FALSE, FALSE, 0);
 
     browser->notebook = gtk_notebook_new();
     gtk_notebook_set_scrollable(GTK_NOTEBOOK(browser->notebook), TRUE);
