@@ -93,6 +93,7 @@ Settings load_settings(const std::string& path) {
     apply(pairs, "shell.window_height", settings.window_height);
     apply(pairs, "privacy.private_tabs_enabled", settings.private_tabs_enabled);
     apply(pairs, "privacy.start_in_private", settings.start_in_private);
+    apply(pairs, "privacy.history_enabled", settings.history_enabled);
     return settings;
 }
 
@@ -108,6 +109,7 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "\n[privacy]\n";
     out << "private_tabs_enabled = " << (settings.private_tabs_enabled ? "true" : "false") << "\n";
     out << "start_in_private = " << (settings.start_in_private ? "true" : "false") << "\n";
+    out << "history_enabled = " << (settings.history_enabled ? "true" : "false") << "\n";
 }
 
 }

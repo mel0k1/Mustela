@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mustela
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Privacy-first, cross-platform browser engine built on WebKit"
     LANGUAGES CXX)
 
@@ -11,7 +11,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(mustela
     src/shell/main.cpp
     src/core/config.cpp
-    src/core/privacy.cpp)
+    src/core/privacy.cpp
+    src/core/history.cpp)
 
 target_include_directories(mustela PRIVATE src)
 

@@ -11,6 +11,7 @@ struct Settings {
     int window_height = 800;
     bool private_tabs_enabled = true;
     bool start_in_private = false;
+    bool history_enabled = true;
 };
 
 Settings load_settings(const std::string& path);
