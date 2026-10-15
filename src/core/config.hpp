@@ -12,6 +12,12 @@ struct Settings {
     bool private_tabs_enabled = true;
     bool start_in_private = false;
     bool history_enabled = true;
+    std::string cookie_policy = "no-third-party";
+    bool tracking_prevention = true;
+    bool javascript_enabled = true;
+    bool hyperlink_auditing = false;
+    bool dns_prefetching = false;
+    bool block_autoplay = true;
 };
 
 Settings load_settings(const std::string& path);

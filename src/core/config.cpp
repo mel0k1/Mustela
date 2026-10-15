@@ -94,6 +94,12 @@ Settings load_settings(const std::string& path) {
     apply(pairs, "privacy.private_tabs_enabled", settings.private_tabs_enabled);
     apply(pairs, "privacy.start_in_private", settings.start_in_private);
     apply(pairs, "privacy.history_enabled", settings.history_enabled);
+    apply(pairs, "privacy.cookie_policy", settings.cookie_policy);
+    apply(pairs, "privacy.tracking_prevention", settings.tracking_prevention);
+    apply(pairs, "privacy.javascript", settings.javascript_enabled);
+    apply(pairs, "privacy.hyperlink_auditing", settings.hyperlink_auditing);
+    apply(pairs, "privacy.dns_prefetching", settings.dns_prefetching);
+    apply(pairs, "privacy.block_autoplay", settings.block_autoplay);
     return settings;
 }
 
@@ -110,6 +116,12 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "private_tabs_enabled = " << (settings.private_tabs_enabled ? "true" : "false") << "\n";
     out << "start_in_private = " << (settings.start_in_private ? "true" : "false") << "\n";
     out << "history_enabled = " << (settings.history_enabled ? "true" : "false") << "\n";
+    out << "cookie_policy = \"" << settings.cookie_policy << "\"\n";
+    out << "tracking_prevention = " << (settings.tracking_prevention ? "true" : "false") << "\n";
+    out << "javascript = " << (settings.javascript_enabled ? "true" : "false") << "\n";
+    out << "hyperlink_auditing = " << (settings.hyperlink_auditing ? "true" : "false") << "\n";
+    out << "dns_prefetching = " << (settings.dns_prefetching ? "true" : "false") << "\n";
+    out << "block_autoplay = " << (settings.block_autoplay ? "true" : "false") << "\n";
 }
 
 }
