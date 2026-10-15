@@ -3,7 +3,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-17-00599C)
-![status](https://img.shields.io/badge/status-M1%20tabbed%20shell-e0a03d)
+![status](https://img.shields.io/badge/status-M1.5_engine_APIs-e0a03d)
 
 Privacy-first, cross-platform browser engine built on WebKit.
 
@@ -19,9 +19,13 @@ Existing engines force a trade-off between privacy, platform coverage and speed.
 
 ## Status
 
-`v0.2.0` — tabbed shell. Tabs, URL bar with search fallback, back/forward/reload, a Mustela-owned profile directory and a TOML settings file with the privacy policy seed: private tabs are opt-in and off by default. The Windows port is stubbed and lands next.
+`v0.3.0` — engine APIs for the browser product. History lives in the core and never records private tabs, the privacy policy supports a runtime toggle, and the shell demonstrates both with a Private switch and a history window (Ctrl+H).
 
 See the [roadmap](docs/ROADMAP.md) for where this goes.
+
+## Ecosystem
+
+- [Kiwi](https://github.com/mel0k1/Kiwi) — the privacy-first browser built on top of Mustela. Mustela is the engine; Kiwi is the product.
 
 ## Build (Linux)
 

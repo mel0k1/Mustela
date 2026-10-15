@@ -43,6 +43,7 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | shell.window_height | 800 | window height, updated on exit |
 | privacy.private_tabs_enabled | true | allow private tabs at all |
 | privacy.start_in_private | false | open new tabs in private mode by default |
+| privacy.history_enabled | true | record visited pages in history |
 
 Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead.
 
@@ -54,6 +55,7 @@ Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profi
 | Ctrl+Shift+P | new private tab |
 | Ctrl+W | close tab |
 | Ctrl+L | focus the address bar |
+| Ctrl+H | history window |
 | Ctrl+R / F5 | reload |
 | Alt+Left / Alt+Right | back / forward |
 | Escape | stop loading |

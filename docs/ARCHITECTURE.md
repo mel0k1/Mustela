@@ -6,11 +6,11 @@ Mustela is a thin, opinionated layer over WebKit. The engine core is upstream We
 
 ```
 +-----------------------------+
-| mustela-browser (UI)        |   planned: the full browser product
+| Kiwi browser (UI)           |   separate repository: github.com/mel0k1/Kiwi
 +-----------------------------+
-| mustela-core                |   today: settings, privacy policy; later: profiles, per-site rules
+| mustela-core                |   today: settings, privacy policy, history; later: profiles, per-site rules
 +-----------------------------+
-| mustela-shell               |   today: embedder shell, one port per platform
+| mustela-shell               |   engine test harness and playground, not the product
 +-----------------------------+
 | WebKit                      |   upstream, kept unpatched as long as possible
 +-----------------------------+
@@ -25,7 +25,9 @@ Mustela is a thin, opinionated layer over WebKit. The engine core is upstream We
 
 Each port lives in its own directory under `src/shell/` and exposes the same entry point (`mustela_main`). Platform selection happens in CMake at configure time, so port sources are never mixed in one build.
 
-`mustela-core` is plain C++17 with no UI or WebKit dependencies: both ports link it, and it stays unit-testable. Privacy decisions go through `PrivacyPolicy` in the core — a port never decides privacy on its own, it only asks.
+`mustela-core` is plain C++17 with no UI or WebKit dependencies: both ports link it, and it stays unit-testable. Privacy decisions go through `PrivacyPolicy` in the core — a port never decides privacy on its own, it only asks. History storage (`HistoryStore`) follows the same rule: the policy decides what gets recorded, private tabs never reach the store.
+
+The product browser built on top of Mustela is [Kiwi](https://github.com/mel0k1/Kiwi) — a separate repository with its own UI and roadmap. Everything in `mustela-shell` is a test harness for the engine APIs Kiwi will consume.
 
 ## WebKit dependency strategy
 

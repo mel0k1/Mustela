@@ -3,7 +3,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-17-00599C)
-![status](https://img.shields.io/badge/status-M1%20tabbed%20shell-e0a03d)
+![status](https://img.shields.io/badge/status-M1.5_engine_APIs-e0a03d)
 
 Приватный кроссплатформенный браузерный движок на базе WebKit.
 
@@ -19,9 +19,13 @@ English version: [README.md](README.md)
 
 ## Статус
 
-`v0.2.0` — оболочка с табами. Табы, адресная строка с поиском, назад/вперёд/перезагрузка, собственный каталог профиля Mustela и TOML-файл настроек с зачатком политики приватности: приватные табы — по явному запросу и выключены по умолчанию. Порт под Windows пока заготовка и появится следующим шагом.
+`v0.3.0` — движковые API для будущего браузера. История живёт в ядре и никогда не записывает приватные табы, политика приватности поддерживает переключение на лету, а оболочка демонстрирует это тумблером Private и окном истории (Ctrl+H).
 
 Куда всё движется — в [дорожной карте](docs/ROADMAP.md).
+
+## Экосистема
+
+- [Kiwi](https://github.com/mel0k1/Kiwi) — приватный браузер поверх Mustela. Mustela — движок, Kiwi — продукт.
 
 ## Сборка (Linux)
 
