@@ -127,6 +127,12 @@ fingerprint = "allow"
 
 `settings.toml` and `sites.toml` are watched while the shell runs. Edits apply within a fraction of a second: the cookie policy re-applies to both contexts, hardening and per-site rules re-apply to every open tab, turning history on recreates its store. ITP may require a restart to fully apply — WebKit expects it to be configured before the profile is used.
 
+### Process model and isolation
+
+The perf switch `perf.process_model` has privacy consequences and is documented as such. The default `per-view` gives every web view its own web process — the upstream WebKitGTK default and the closest thing to site isolation these ports offer. Setting `shared` puts all views into one shared web process: memory drops, but a renderer compromise or a site reading shared state reaches everything open in that process. Treat `shared` as a battery-and-RAM trade-off for trusted browsing, not a default.
+
+The performance log (`perf.log`) records only local timing and RSS numbers: durations, timestamps, and the URL of the page that finished loading. URLs in `perf.jsonl` are effectively a second history file on disk, so it is gated by the same kind of switch as history — set `perf.log = false` to stop writing it entirely, or clear browsing data habits should include it (it lives in the same profile directory).
+
 ### History
 
 History is stored by the core (`HistoryStore`) inside the default profile. Private tabs never reach it — `PrivacyPolicy::records_history` returns false for them — and `privacy.history_enabled = false` turns recording off entirely.

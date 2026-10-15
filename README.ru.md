@@ -3,8 +3,8 @@
 ![ci](https://github.com/mel0k1/Mustela/actions/workflows/ci.yml/badge.svg)
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
-![language](https://img.shields.io/badge/C%2B%2B-17-00599C)
-![status](https://img.shields.io/badge/status-M3_wincairo-e0a03d)
+![language](https://img.shields.io/badge/C%2B%2B-20-00599C)
+![status](https://img.shields.io/badge/status-M4_performance-e0a03d)
 
 Приватный кроссплатформенный браузерный движок на базе WebKit.
 
@@ -20,9 +20,9 @@ English version: [README.md](README.md)
 
 ## Статус
 
-`v0.7.0` — Windows-порт стал настоящим: `src/shell/win/` встраивает апстримный WinCairo-вариант WebKit через его C API — табы, адресная строка с поиском, персистентный профиль в `%APPDATA%\mustela`, приватные табы на неперсистентных data store, политика куки, ITP, hardening-переключатели, весь fingerprint-бюджет (user scripts плюс скомпилированный content filter), история, очистка browsing-data и hot-reload настроек. CI собирает и тестирует три дорожки: GTK-шелл на Linux, ядро под MSVC и Windows-шелл, компилируемый против запиненных апстрим-заголовков WebKit. Переносимое ядро покрыто тест-сьютом на 125 проверок (`mustela_core_tests`), а нормализация URL переехала в ядро — им будет пользоваться и [Kiwi](https://github.com/mel0k1/Kiwi).
+`v0.8.0` — производительность стала измеряемой поверхностью, а не лозунгом. Старт замеряется до первого map (Linux) / первой отрисовки (Windows) и сверяется с `perf.startup_budget_ms`; загрузки страниц замеряются от provisional-старта до финиша; RSS дерева процессов опрашивается раз в минуту против `perf.memory_ceiling_mb` с предупреждением в статус-баре; `perf.process_model` переключает изоляцию per-view и общий web-процесс экономии памяти. Все сэмплы пишутся в `perf.jsonl` в профиле, `scripts/perf_check.py` сравнивает медианы с записанным базлайном для отслеживания регрессий, а новый харнесс `mustela-bench` гоняет реальные загрузки в CI (Linux, под xvfb) с JSON-результатом и бюджетным кодом выхода. CI собирает всё это на каждый пуш: GTK-шелл + ctest + bench на Linux, ядро под MSVC и Windows-шелл против запиненных апстрим-заголовков WebKit. Переносимое ядро покрыто тест-сьютом на 180 проверок.
 
-Ядро приватности v0.6 остаётся базой: политика куки, ITP, hardening, очистка browsing-data, per-site overrides, fingerprint-бюджет и hot-reload — всё решается через `PrivacyPolicy` в ядре.
+База v0.7 — Windows-порт: `src/shell/win/` встраивает апстримный WinCairo-вариант WebKit через его C API — табы, адресная строка с поиском, персистентный профиль в `%APPDATA%\mustela`, приватные табы на неперсистентных data store, политика куки, ITP, hardening-переключатели, весь fingerprint-бюджет (user scripts плюс скомпилированный content filter), история, очистка browsing-data и hot-reload настроек — а ядро приватности v0.6 (политика куки, ITP, hardening, per-site overrides, fingerprint-бюджет, hot-reload) по-прежнему решает всё через `PrivacyPolicy` в ядре.
 
 Куда всё движется — в [дорожной карте](docs/ROADMAP.md).
 
@@ -54,7 +54,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Сьют покрывает round-trip настроек, инварианты приватности, матчинг правил сайтов, экранирование истории, fingerprint-пресеты, browsing-data kinds и нормализацию URL. На Linux в том же прогоне собирается полный GTK-шелл; на Windows CI дополнительно компилирует `shell_win.cpp` против запиненных апстрим-заголовков WebKit C API.
+Сьют покрывает round-trip настроек, инварианты приватности, матчинг правил сайтов, экранирование истории, fingerprint-пресеты, browsing-data kinds, нормализацию URL и перф-модуль (статистика, кодек записей, бюджеты). На Linux в том же прогоне собираются полный GTK-шелл и `mustela-bench`, а bench грузит локальную фикстуру под xvfb; на Windows CI дополнительно компилирует `shell_win.cpp` против запиненных апстрим-заголовков WebKit C API.
 
 ## Структура
 

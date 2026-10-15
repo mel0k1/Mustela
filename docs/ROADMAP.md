@@ -53,11 +53,16 @@ Known gaps, tracked for the next pass: per-site cookie denial works through the 
 - Windows: core and tests under MSVC. (done)
 - Windows shell syntax check against 80 pinned upstream WebKit C API headers (`scripts/fetch-win-headers.ps1`). (done)
 
-## M4 — Performance
+## M4 — Performance (done)
 
-- Startup time budget with regression tracking.
-- Process model tuning and memory ceiling measurements.
-- Profiling harness for page-load benchmarks.
+- Startup budget: time-to-first-map on Linux, time-to-first-paint on Windows, enforced against `perf.startup_budget_ms` and logged. (done)
+- Process model tuning: `perf.process_model` (`per-view` or `shared`) wired through `WebKitWebContext` and `WKContextSetProcessModel`. (done)
+- Memory ceiling: process-tree RSS sampling every minute (`/proc` on Linux, `GetProcessMemoryInfo` + Toolhelp on Windows), `perf.memory_ceiling_mb` drives a status-bar warning, samples go to the log. (done)
+- Page-load timing between provisional start and finish navigation, appended to `perf.jsonl` in the profile. (done)
+- `mustela-bench` harness: real loads through a minimal offscreen WebKit shell, JSON stats (min/median/p95/max), budget exit code; runs under `xvfb-run` in CI on every push. (done)
+- Regression tracking: `scripts/perf_check.py` summarizes `perf.jsonl` and compares medians against a recorded baseline with tolerance. (done)
+
+Known gaps, tracked for the next pass: the ceiling only warns — there is no tab discarding (WebKitGTK and the WinCairo C API expose no per-view suspend), `mustela-bench` is Linux-only (the WinCairo harness would need a hidden-hostwindow variant), and `perf.process_model` is applied at startup only.
 
 ## M5 — Kiwi browser
 

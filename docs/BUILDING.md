@@ -54,8 +54,12 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | privacy.fingerprint_canvas | false | canvas readbacks (`toDataURL`, `toBlob`, `getImageData`, `readPixels`) return blank data |
 | privacy.fingerprint_fonts | false | block every remote font download |
 | privacy.fingerprint_referrer | same-origin | `off`, `same-origin` (no cross-origin Referer) or `no-referrer` |
+| perf.process_model | per-view | `per-view` (one web process per view, upstream default) or `shared` (a single shared web process — lower memory, weaker site isolation, applies at startup) |
+| perf.startup_budget_ms | 0 | startup budget; `0` disables the check, otherwise the shell flashes `startup Nms over budget` when the time to first mapped window exceeds it |
+| perf.memory_ceiling_mb | 0 | process-tree RSS ceiling; `0` disables monitoring, otherwise the status bar shows `mem N MB` while the ceiling is exceeded |
+| perf.log | true | append startup, page-load and memory samples to `perf.jsonl` in the profile directory |
 
-Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead. The compiled remote-font filter is cached under the same profile in `filters/`.
+Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead. The compiled remote-font filter is cached under the same profile in `filters/`, and performance samples are appended to `perf.jsonl` there.
 
 Both `settings.toml` and `sites.toml` are watched while the browser runs — edits apply to open tabs without a restart.
 
@@ -101,7 +105,28 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-`mustela_core_tests` covers settings round-trips (including partial files and fallbacks), privacy mapping and gating invariants, `host_from_uri` parsing, site-rule suffix matching and persistence, `resolve_site` precedence, history escaping/limits/dedup, fingerprint presets and referrer substitution, browsing-data kinds and URL normalization. It runs on every push in CI on both Linux and Windows.
+`mustela_core_tests` covers settings round-trips (including partial files and fallbacks), privacy mapping and gating invariants, `host_from_uri` parsing, site-rule suffix matching and persistence, `resolve_site` precedence, history escaping/limits/dedup, fingerprint presets and referrer substitution, browsing-data kinds, URL normalization and the perf module (statistics, record codec, log trimming, `/proc` RSS parsing, budget and ceiling verdicts). It runs on every push in CI on both Linux and Windows.
+
+## Benchmarks
+
+`mustela-bench` measures real page loads through a minimal offscreen shell. It is built on Linux (WebKitGTK) with the default options:
+
+```bash
+cmake --build build --target mustela-bench
+xvfb-run -a env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \
+  ./build/mustela-bench --url "file://$PWD/tests/fixtures/bench.html" --runs 5 --max-ms 10000
+```
+
+Options: `--url` (required), `--runs N` (default 5), `--max-ms M` — fail with exit code 2 when the median exceeds the budget, `--out FILE` — write the JSON result to a file. The output is one JSON line: `n`, `min_ms`, `median_ms`, `p95_ms`, `max_ms`. Exit codes: 0 ok, 2 budget exceeded or no completed loads, 3 load failed, 4 load timed out. CI runs exactly this command (with `--max-ms 10000`) on every push; the sandbox environment variable is only needed inside headless containers.
+
+Page-load samples recorded by the shells and by `mustela-bench`-style runs land in `perf.jsonl` in the profile directory. `scripts/perf_check.py` summarizes them and compares against a baseline for regression tracking:
+
+```bash
+python3 scripts/perf_check.py ~/.local/share/mustela/profiles/default/perf.jsonl --update --baseline perf-baseline.json
+python3 scripts/perf_check.py ~/.local/share/mustela/profiles/default/perf.jsonl --baseline perf-baseline.json --tolerance 1.25 --slack-ms 100
+```
+
+The first run records the baseline (per-kind median/p95/max), the second fails with exit code 1 when a median grows beyond `baseline * tolerance + slack`. Memory samples are compared as absolute bytes with the same slack logic.
 
 ## Windows
 
@@ -128,4 +153,6 @@ The SDK directory is expected to have `include/WebKit/*.h` (the C API headers fr
 
 CI compiles `shell_win.cpp` against 80 pinned upstream headers on every push (job `windows shell`), so the Windows sources are never farther than one commit from reality. The header set is listed in `scripts/win-headers.txt` and fetched by `scripts/fetch-win-headers.ps1`.
 
-Profile data on Windows lives under `%APPDATA%\mustela`: `settings.toml` and `sites.toml` at the root, `profiles\default\` for cookies, cache, storage and the compiled font filter. Both TOML files are watched with `ReadDirectoryChangesW` — edits apply live, same as on Linux.
+Profile data on Windows lives under `%APPDATA%\mustela`: `settings.toml` and `sites.toml` at the root, `profiles\default\` for cookies, cache, storage, the compiled font filter and `perf.jsonl`. Both TOML files are watched with `ReadDirectoryChangesW` — edits apply live, same as on Linux. The perf module works identically on both ports: startup is measured to first paint (`WM_PAINT`), memory is sampled from the process tree via `GetProcessMemoryInfo`, and page loads are timed between the provisional-start and finish navigation callbacks.
+
+The only perf key that is not applied live is `perf.process_model` — the process model is fixed when the contexts are created, so changing it requires a restart.

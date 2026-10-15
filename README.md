@@ -3,8 +3,8 @@
 ![ci](https://github.com/mel0k1/Mustela/actions/workflows/ci.yml/badge.svg)
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
-![language](https://img.shields.io/badge/C%2B%2B-17-00599C)
-![status](https://img.shields.io/badge/status-M3_wincairo-e0a03d)
+![language](https://img.shields.io/badge/C%2B%2B-20-00599C)
+![status](https://img.shields.io/badge/status-M4_performance-e0a03d)
 
 Privacy-first, cross-platform browser engine built on WebKit.
 
@@ -20,9 +20,9 @@ Existing engines force a trade-off between privacy, platform coverage and speed.
 
 ## Status
 
-`v0.7.0` — the Windows port is real: `src/shell/win/` embeds the upstream WinCairo flavor of WebKit through its C API — tabs, URL bar with search fallback, persistent profile under `%APPDATA%\mustela`, private tabs on non-persistent data stores, cookie accept policy, ITP, hardening switches, the full fingerprint budget (user scripts plus a compiled content filter), history, clear-browsing-data and settings hot-reload. CI builds and tests all three lanes: the GTK shell on Linux, the core on MSVC, and the Windows shell compiled against pinned upstream WebKit headers. The portable core is covered by a 125-check test suite (`mustela_core_tests`), and URL normalization moved into the core where [Kiwi](https://github.com/mel0k1/Kiwi) will use it too.
+`v0.8.0` — performance is a measured surface, not a slogan. Startup is timed to first map (Linux) / first paint (Windows) and enforced against `perf.startup_budget_ms`; page loads are timed between provisional start and finish; the process tree's RSS is sampled every minute against `perf.memory_ceiling_mb` with a status-bar warning; `perf.process_model` switches between per-view isolation and a shared low-memory web process. All samples append to `perf.jsonl` in the profile, `scripts/perf_check.py` compares medians against a recorded baseline for regression tracking, and a new `mustela-bench` harness runs real page loads in CI (Linux, under xvfb) with a JSON result and a budget exit code. CI now builds all of this on every push: the GTK shell plus ctest plus the bench on Linux, the core on MSVC, and the Windows shell against pinned upstream WebKit headers. The portable core is covered by a 180-check test suite.
 
-The v0.6 privacy core remains the base: cookie policy, ITP, hardening, browsing-data clearing, per-site overrides, fingerprint budget and hot-reload, all resolved through `PrivacyPolicy` in the core.
+The v0.7 Windows port remains the base: `src/shell/win/` embeds the upstream WinCairo flavor of WebKit through its C API — tabs, URL bar with search fallback, persistent profile under `%APPDATA%\mustela`, private tabs on non-persistent data stores, cookie accept policy, ITP, hardening switches, the full fingerprint budget (user scripts plus a compiled content filter), history, clear-browsing-data and settings hot-reload — and the v0.6 privacy core (cookie policy, ITP, hardening, per-site overrides, fingerprint budget, hot-reload) keeps resolving everything through `PrivacyPolicy` in the core.
 
 See the [roadmap](docs/ROADMAP.md) for where this goes.
 
@@ -54,7 +54,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The suite covers settings round-trips, privacy gating invariants, site-rule matching, history escaping, fingerprint presets, browsing-data kinds and URL normalization. On Linux the full GTK shell is built in the same run; on Windows, CI additionally compiles `shell_win.cpp` against pinned upstream WebKit C API headers.
+The suite covers settings round-trips, privacy gating invariants, site-rule matching, history escaping, fingerprint presets, browsing-data kinds, URL normalization and the perf module (statistics, record codec, budgets). On Linux the full GTK shell and `mustela-bench` are built in the same run, and the bench loads the local fixture under xvfb; on Windows, CI additionally compiles `shell_win.cpp` against pinned upstream WebKit C API headers.
 
 ## Layout
 
