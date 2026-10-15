@@ -1,8 +1,10 @@
 #pragma once
 
 #include <gtk/gtk.h>
+#include <webkit2/webkit2.h>
 #include <string>
 
+#include "perf.hpp"
 #include "privacy.hpp"
 
 namespace mustela {
@@ -20,6 +22,7 @@ public:
     void set_label(GtkWidget* label) { label_ = label; }
     bool is_private() const { return private_; }
     TabPrivacy privacy() const { return private_ ? TabPrivacy::Private : TabPrivacy::Normal; }
+    LoadTimer load;
 
     std::string uri() const;
     std::string title() const;

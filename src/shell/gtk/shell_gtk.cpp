@@ -2,15 +2,22 @@
 #include <webkit2/webkit2.h>
 #include <glib/gstdio.h>
 
+#include <dirent.h>
+#include <unistd.h>
+
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "browsing_data.hpp"
 #include "config.hpp"
+#include "fingerprint_scripts.hpp"
 #include "history.hpp"
+#include "perf.hpp"
 #include "privacy.hpp"
 #include "site_rules.hpp"
 #include "tab.hpp"
@@ -54,6 +61,11 @@ struct Browser {
     guint sites_reload_pending = 0;
     WebKitUserContentFilterStore* filter_store = nullptr;
     WebKitUserContentFilter* fonts_filter = nullptr;
+    std::unique_ptr<mustela::PerfLog> perf;
+    std::int64_t memory_bytes = 0;
+    bool memory_over = false;
+    bool startup_marked = false;
+    double startup_entry_ms = 0;
     std::vector<std::unique_ptr<Tab>> tabs;
 };
 
@@ -68,6 +80,97 @@ void open_site_rules_window(Browser& b);
 void clear_browsing_data(Browser& b);
 void apply_policies_to_tabs(Browser& b);
 void apply_fingerprint(Browser& b, WebKitWebView* view, const FingerprintPolicy& fp);
+void refresh_status(Browser& b);
+void flash_status(const char* text);
+void mark_startup(Browser& b);
+
+void record_perf(Browser& b, const std::string& kind, double value_ms, std::int64_t value_bytes,
+    const std::string& detail) {
+    if (!b.perf || !b.settings.perf_log) return;
+    mustela::PerfRecord record;
+    record.kind = kind;
+    record.timestamp = static_cast<std::int64_t>(std::time(nullptr));
+    record.value_ms = value_ms;
+    record.value_bytes = value_bytes;
+    record.detail = detail;
+    b.perf->append(record);
+}
+
+void mark_startup(Browser& b) {
+    if (b.startup_marked) return;
+    b.startup_marked = true;
+    double elapsed = mustela::Stopwatch::now_ms() - b.startup_entry_ms;
+    record_perf(b, "startup", elapsed, 0, "to-map");
+    if (b.settings.startup_budget_ms > 0) {
+        std::string text = "startup " + std::to_string(static_cast<int>(elapsed)) + "ms";
+        if (!mustela::within_budget(b.settings.startup_budget_ms, elapsed)) text += " over budget";
+        flash_status(text.c_str());
+    }
+}
+
+gboolean on_window_mapped(GtkWidget*, GdkEvent*, gpointer) {
+    if (browser) mark_startup(*browser);
+    return FALSE;
+}
+
+std::string read_small_file(const char* path) {
+    std::ifstream in(path);
+    if (!in) return "";
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+}
+
+std::int64_t children_rss_bytes() {
+    std::int64_t total = 0;
+    pid_t self = getpid();
+    DIR* proc = opendir("/proc");
+    if (!proc) return 0;
+
+    while (dirent* entry = readdir(proc)) {
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
+        std::string stat_content = read_small_file((std::string("/proc/") + entry->d_name + "/stat").c_str());
+        size_t close = stat_content.rfind(')');
+        if (close == std::string::npos) continue;
+
+        std::istringstream fields(stat_content.substr(close + 1));
+        std::string state;
+        long ppid = 0;
+        fields >> state >> ppid;
+        if (ppid != self) continue;
+
+        std::string status_content = read_small_file((std::string("/proc/") + entry->d_name + "/status").c_str());
+        total += mustela::parse_status_rss_bytes(status_content);
+    }
+    closedir(proc);
+    return total;
+}
+
+void sample_memory(Browser& b) {
+    std::int64_t self_bytes = mustela::parse_status_rss_bytes(read_small_file("/proc/self/status"));
+    b.memory_bytes = self_bytes + children_rss_bytes();
+    bool over = mustela::ceiling_exceeded(b.settings.memory_ceiling_mb, b.memory_bytes);
+    record_perf(b, "memory", 0.0, b.memory_bytes, "rss");
+    if (over != b.memory_over) {
+        b.memory_over = over;
+        refresh_status(b);
+    }
+}
+
+gboolean on_memory_timer(gpointer) {
+    if (browser) sample_memory(*browser);
+    return G_SOURCE_CONTINUE;
+}
+
+void apply_process_model(WebKitWebContext* context, const std::string& name) {
+    WebKitProcessModel model = mustela::process_model_from(name) == mustela::ProcessModel::Shared
+        ? WEBKIT_PROCESS_MODEL_SHARED_SECONDARY_PROCESS
+        : WEBKIT_PROCESS_MODEL_MULTIPLE_SECONDARY_PROCESSES;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    webkit_web_context_set_process_model(context, model);
+#pragma GCC diagnostic pop
+}
 
 Tab* active_tab(Browser& b) {
     gint page = gtk_notebook_get_current_page(GTK_NOTEBOOK(b.notebook));
@@ -88,7 +191,7 @@ std::string tab_label_text(const Tab& tab) {
     return text;
 }
 
-void update_tab_label(Browser& b, Tab* tab) {
+void update_tab_label(Browser&, Tab* tab) {
     if (!tab || !tab->label()) return;
     gtk_label_set_text(GTK_LABEL(tab->label()), tab_label_text(*tab).c_str());
     gtk_widget_set_tooltip_text(tab->label(), tab->uri().c_str());
@@ -111,6 +214,9 @@ void refresh_status(Browser& b) {
     text += std::string("cookies ") + mustela::cookie_policy_name(b.privacy.cookies);
     if (b.privacy.hardening.tracking_prevention) text += " · itp";
     if (b.privacy.fingerprint.active()) text += " · fp";
+    if (b.memory_over) {
+        text += " · mem " + std::to_string(static_cast<int>(b.memory_bytes / (1024 * 1024))) + " MB";
+    }
     gtk_label_set_text(GTK_LABEL(b.status_label), text.c_str());
 }
 
@@ -164,7 +270,7 @@ guint webkit_data_types(DataKind kinds) {
     if (mustela::has(kinds, DataKind::Cookies)) types |= WEBKIT_WEBSITE_DATA_COOKIES;
     if (mustela::has(kinds, DataKind::Cache)) types |= WEBKIT_WEBSITE_DATA_MEMORY_CACHE | WEBKIT_WEBSITE_DATA_DISK_CACHE;
     if (mustela::has(kinds, DataKind::LocalStorage)) types |= WEBKIT_WEBSITE_DATA_LOCAL_STORAGE | WEBKIT_WEBSITE_DATA_SESSION_STORAGE;
-    if (mustela::has(kinds, DataKind::IndexedDB)) types |= WEBKIT_WEBSITE_DATA_INDEXEDDB;
+    if (mustela::has(kinds, DataKind::IndexedDB)) types |= WEBKIT_WEBSITE_DATA_INDEXEDDB_DATABASES;
     return types;
 }
 
@@ -337,7 +443,7 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
     return FALSE;
 }
 
-void on_view_uri_changed(GObject* object, GParamSpec*, gpointer user_data) {
+void on_view_uri_changed(GObject*, GParamSpec*, gpointer user_data) {
     Tab* tab = static_cast<Tab*>(user_data);
     update_tab_label(*browser, tab);
     if (active_tab(*browser) == tab) refresh_chrome(*browser);
@@ -358,11 +464,18 @@ void on_view_progress_changed(GObject* object, GParamSpec*, gpointer) {
 
 void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_data) {
     Tab* tab = static_cast<Tab*>(user_data);
+    if (event == WEBKIT_LOAD_STARTED) {
+        tab->load.start(mustela::Stopwatch::now_ms());
+    }
     if (event == WEBKIT_LOAD_COMMITTED) {
         apply_view_policy(*browser, tab->view(), tab->uri());
     }
     if (event == WEBKIT_LOAD_FINISHED) {
         gtk_entry_set_progress_fraction(GTK_ENTRY(browser->url_entry), 0.0);
+        double elapsed = tab->load.stop(mustela::Stopwatch::now_ms());
+        if (elapsed >= 0.0 && !tab->uri().empty()) {
+            record_perf(*browser, "pageload", elapsed, 0, tab->uri());
+        }
         if (tab && browser->history) {
             std::string uri = tab->uri();
             if (!uri.empty() && browser->privacy.records_history(tab->privacy())) {
@@ -375,6 +488,11 @@ void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_d
         }
     }
     refresh_chrome(*browser);
+}
+
+void on_view_load_failed(WebKitWebView*, WebKitLoadEvent, const char*, GError*, gpointer user_data) {
+    Tab* tab = static_cast<Tab*>(user_data);
+    tab->load.cancel();
 }
 
 void on_go_back(GtkButton*, gpointer) {
@@ -435,7 +553,7 @@ void close_tab(Browser& b, Tab* tab) {
     refresh_chrome(b);
 }
 
-GtkWidget* build_tab_label(Browser& b, Tab* tab) {
+GtkWidget* build_tab_label(Browser&, Tab* tab) {
     GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     GtkWidget* label = gtk_label_new(tab_label_text(*tab).c_str());
     gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
@@ -471,6 +589,7 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     g_signal_connect(view, "notify::title", G_CALLBACK(on_view_title_changed), tab);
     g_signal_connect(view, "notify::estimated-load-progress", G_CALLBACK(on_view_progress_changed), tab);
     g_signal_connect(view, "load-changed", G_CALLBACK(on_view_load_changed), tab);
+    g_signal_connect(view, "load-failed", G_CALLBACK(on_view_load_failed), tab);
 
     if (url && *url) webkit_web_view_load_uri(view, url);
     refresh_chrome(b);
@@ -802,10 +921,11 @@ GFileMonitor* monitor_file(const gchar* path, GCallback changed) {
 }
 
 int mustela_main(int argc, char** argv) {
-    gtk_init(&argc, &argv);
-
     Browser instance;
     browser = &instance;
+    browser->startup_entry_ms = mustela::Stopwatch::now_ms();
+
+    gtk_init(&argc, &argv);
 
     gchar* config_dir = g_build_filename(g_get_user_config_dir(), "mustela", nullptr);
     g_mkdir_with_parents(config_dir, 0700);
@@ -829,6 +949,7 @@ int mustela_main(int argc, char** argv) {
 
     gchar* profile_dir = g_build_filename(g_get_user_data_dir(), "mustela", "profiles", "default", nullptr);
     g_mkdir_with_parents(profile_dir, 0700);
+    browser->perf = std::make_unique<mustela::PerfLog>(std::string(profile_dir) + "/perf.jsonl");
 
     if (browser->privacy.history_enabled) {
         gchar* history_path = g_build_filename(profile_dir, "history.dat", nullptr);
@@ -854,6 +975,8 @@ int mustela_main(int argc, char** argv) {
     browser->normal_context = webkit_web_context_new_with_website_data_manager(data_manager);
     g_object_unref(data_manager);
     browser->private_context = webkit_web_context_new_ephemeral();
+    apply_process_model(browser->normal_context, browser->settings.process_model);
+    apply_process_model(browser->private_context, browser->settings.process_model);
     apply_cookie_policy(browser->normal_context, browser->privacy.cookies);
     apply_cookie_policy(browser->private_context, browser->privacy.cookies);
 
@@ -873,6 +996,7 @@ int mustela_main(int argc, char** argv) {
     gtk_window_set_default_size(GTK_WINDOW(window), browser->settings.window_width, browser->settings.window_height);
     g_signal_connect(window, "destroy", G_CALLBACK(on_destroy), nullptr);
     g_signal_connect(window, "key-press-event", G_CALLBACK(on_key_press), nullptr);
+    g_signal_connect(window, "map-event", G_CALLBACK(on_window_mapped), nullptr);
 
     GtkWidget* toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
     gtk_container_set_border_width(GTK_CONTAINER(toolbar), 2);
@@ -935,6 +1059,8 @@ int mustela_main(int argc, char** argv) {
     open_tab(*browser, url && *url ? url : browser->settings.homepage.c_str(), request);
 
     gtk_widget_show_all(window);
+    sample_memory(*browser);
+    g_timeout_add_seconds(60, on_memory_timer, nullptr);
     gtk_main();
 
     g_free(config_dir);
