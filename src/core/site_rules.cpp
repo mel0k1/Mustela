@@ -92,6 +92,7 @@ void SiteRules::load() {
 
         if (key == "javascript") rules_[host].javascript = site_rule_from(value);
         if (key == "cookies") rules_[host].cookies = site_rule_from(value);
+        if (key == "fingerprint") rules_[host].fingerprint = site_rule_from(value);
     }
 }
 
@@ -100,13 +101,17 @@ void SiteRules::save() const {
     if (!out) return;
 
     for (const auto& [host, policy] : rules_) {
-        if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default) continue;
+        if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
+            && policy.fingerprint == SiteRule::Default) continue;
         out << "[" << host << "]\n";
         if (policy.javascript != SiteRule::Default) {
             out << "javascript = \"" << site_rule_name(policy.javascript) << "\"\n";
         }
         if (policy.cookies != SiteRule::Default) {
             out << "cookies = \"" << site_rule_name(policy.cookies) << "\"\n";
+        }
+        if (policy.fingerprint != SiteRule::Default) {
+            out << "fingerprint = \"" << site_rule_name(policy.fingerprint) << "\"\n";
         }
         out << "\n";
     }
@@ -132,7 +137,8 @@ SitePolicy SiteRules::policy_for(const std::string& host) const {
 void SiteRules::set(const std::string& host, const SitePolicy& policy) {
     std::string key = to_lower(trim(host));
     if (key.empty()) return;
-    if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default) {
+    if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
+        && policy.fingerprint == SiteRule::Default) {
         rules_.erase(key);
         return;
     }
@@ -146,7 +152,8 @@ void SiteRules::remove(const std::string& host) {
 std::vector<SiteRules::Entry> SiteRules::entries() const {
     std::vector<Entry> out;
     for (const auto& [host, policy] : rules_) {
-        if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default) continue;
+        if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
+            && policy.fingerprint == SiteRule::Default) continue;
         out.push_back(Entry{host, policy});
     }
     return out;

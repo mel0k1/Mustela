@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "fingerprint.hpp"
 #include "site_rules.hpp"
 
 namespace mustela {
@@ -33,6 +34,7 @@ struct PrivacyPolicy {
     TabPrivacy default_private = TabPrivacy::Normal;
     CookiePolicy cookies = CookiePolicy::NoThirdParty;
     Hardening hardening;
+    FingerprintPolicy fingerprint;
 
     TabPrivacy tab_privacy(TabPrivacy requested) const {
         if (requested == TabPrivacy::Private && private_tabs_available) return TabPrivacy::Private;
@@ -51,6 +53,7 @@ PrivacyPolicy privacy_from(const Settings& settings);
 struct SiteDecision {
     bool javascript = true;
     bool cookies_denied = false;
+    FingerprintPolicy fingerprint;
 };
 
 SiteDecision resolve_site(const PrivacyPolicy& policy, const SiteRules& rules, const std::string& uri);

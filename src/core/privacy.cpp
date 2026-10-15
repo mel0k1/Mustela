@@ -32,6 +32,10 @@ PrivacyPolicy privacy_from(const Settings& settings) {
     policy.hardening.hyperlink_auditing = settings.hyperlink_auditing;
     policy.hardening.dns_prefetching = settings.dns_prefetching;
     policy.hardening.autoplay_blocked = settings.block_autoplay;
+    policy.fingerprint.block_webgl = settings.fingerprint_webgl;
+    policy.fingerprint.block_canvas_readback = settings.fingerprint_canvas;
+    policy.fingerprint.block_remote_fonts = settings.fingerprint_fonts;
+    policy.fingerprint.referrer = referrer_trim_from(settings.fingerprint_referrer);
     return policy;
 }
 
@@ -42,6 +46,9 @@ SiteDecision resolve_site(const PrivacyPolicy& policy, const SiteRules& rules, c
     if (site.javascript == SiteRule::Allow) decision.javascript = true;
     if (site.javascript == SiteRule::Deny) decision.javascript = false;
     decision.cookies_denied = site.cookies == SiteRule::Deny;
+    decision.fingerprint = policy.fingerprint;
+    if (site.fingerprint == SiteRule::Allow) decision.fingerprint = FingerprintPolicy{};
+    if (site.fingerprint == SiteRule::Deny) decision.fingerprint = fingerprint_strict();
     return decision;
 }
 

@@ -18,6 +18,10 @@ struct Settings {
     bool hyperlink_auditing = false;
     bool dns_prefetching = false;
     bool block_autoplay = true;
+    bool fingerprint_webgl = false;
+    bool fingerprint_canvas = false;
+    bool fingerprint_fonts = false;
+    std::string fingerprint_referrer = "same-origin";
 };
 
 Settings load_settings(const std::string& path);

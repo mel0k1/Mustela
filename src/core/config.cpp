@@ -100,6 +100,10 @@ Settings load_settings(const std::string& path) {
     apply(pairs, "privacy.hyperlink_auditing", settings.hyperlink_auditing);
     apply(pairs, "privacy.dns_prefetching", settings.dns_prefetching);
     apply(pairs, "privacy.block_autoplay", settings.block_autoplay);
+    apply(pairs, "privacy.fingerprint_webgl", settings.fingerprint_webgl);
+    apply(pairs, "privacy.fingerprint_canvas", settings.fingerprint_canvas);
+    apply(pairs, "privacy.fingerprint_fonts", settings.fingerprint_fonts);
+    apply(pairs, "privacy.fingerprint_referrer", settings.fingerprint_referrer);
     return settings;
 }
 
@@ -122,6 +126,10 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "hyperlink_auditing = " << (settings.hyperlink_auditing ? "true" : "false") << "\n";
     out << "dns_prefetching = " << (settings.dns_prefetching ? "true" : "false") << "\n";
     out << "block_autoplay = " << (settings.block_autoplay ? "true" : "false") << "\n";
+    out << "fingerprint_webgl = " << (settings.fingerprint_webgl ? "true" : "false") << "\n";
+    out << "fingerprint_canvas = " << (settings.fingerprint_canvas ? "true" : "false") << "\n";
+    out << "fingerprint_fonts = " << (settings.fingerprint_fonts ? "true" : "false") << "\n";
+    out << "fingerprint_referrer = \"" << settings.fingerprint_referrer << "\"\n";
 }
 
 }
