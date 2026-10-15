@@ -1,6 +1,8 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <psapi.h>
 #include <shlobj.h>
+#include <tlhelp32.h>
 
 #include <atomic>
 #include <cstring>
@@ -14,11 +16,13 @@
 #include "fingerprint.hpp"
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
+#include "perf.hpp"
 #include "privacy.hpp"
 #include "site_rules.hpp"
 #include "url.hpp"
 
 #include <WebKit/WebKit2_C.h>
+#include <WebKit/WKContext.h>
 #include <WebKit/WKView.h>
 #include <WebKit/WKContextConfigurationRef.h>
 #include <WebKit/WKWebsiteDataStoreRef.h>
@@ -73,6 +77,18 @@ const UINT WM_APP_RELOAD_CHANGED = WM_APP + 1;
 const UINT TIMER_FLASH = 1;
 const UINT TIMER_RELOAD = 2;
 const UINT TIMER_WATCH = 3;
+const UINT TIMER_MEMORY = 4;
+const UINT_PTR URL_SUBCLASS_ID = 1;
+const WORD ID_URL_ENTER = 0x0900;
+
+LRESULT CALLBACK url_edit_subclass(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam,
+    UINT_PTR, DWORD_PTR) {
+    if (message == WM_KEYDOWN && wparam == VK_RETURN) {
+        SendMessageW(GetParent(wnd), WM_COMMAND, MAKEWPARAM(ID_URL, ID_URL_ENTER), 0);
+        return 0;
+    }
+    return DefSubclassProc(wnd, message, wparam, lparam);
+}
 
 std::wstring to_wide(const std::string& text) {
     if (text.empty()) return std::wstring();
@@ -199,6 +215,11 @@ struct Browser {
     WKWebsiteDataStoreRef persistent_store = nullptr;
     WKUserContentExtensionStoreRef filter_store = nullptr;
     WKUserContentFilterRef fonts_filter = nullptr;
+    std::unique_ptr<mustela::PerfLog> perf;
+    std::int64_t memory_bytes = 0;
+    bool memory_over = false;
+    bool startup_marked = false;
+    double startup_entry_ms = 0;
 
     std::vector<std::unique_ptr<WinTab>> tabs;
     int active = -1;
@@ -219,6 +240,7 @@ struct WinTab {
     TabPrivacy privacy = TabPrivacy::Normal;
     std::string uri;
     std::string title;
+    mustela::LoadTimer load;
 };
 
 Browser* browser = nullptr;
@@ -257,6 +279,79 @@ void apply_cookie_policy(WKWebsiteDataStoreRef store, CookiePolicy policy) {
 
 void apply_itp(WKWebsiteDataStoreRef store, bool enabled) {
     WKWebsiteDataStoreSetResourceLoadStatisticsEnabled(store, enabled ? TRUE : FALSE);
+}
+
+void refresh_status(Browser& b);
+void flash_status(Browser& b, const std::string& text);
+void mark_startup(Browser& b);
+
+void record_perf(Browser& b, const std::string& kind, double value_ms, std::int64_t value_bytes,
+    const std::string& detail) {
+    if (!b.perf || !b.settings.perf_log) return;
+    mustela::PerfRecord record;
+    record.kind = kind;
+    record.timestamp = static_cast<std::int64_t>(std::time(nullptr));
+    record.value_ms = value_ms;
+    record.value_bytes = value_bytes;
+    record.detail = detail;
+    b.perf->append(record);
+}
+
+void mark_startup(Browser& b) {
+    if (b.startup_marked) return;
+    b.startup_marked = true;
+    double elapsed = mustela::Stopwatch::now_ms() - b.startup_entry_ms;
+    record_perf(b, "startup", elapsed, 0, "to-first-paint");
+    if (b.settings.startup_budget_ms > 0) {
+        std::string text = "startup " + std::to_string(static_cast<int>(elapsed)) + "ms";
+        if (!mustela::within_budget(b.settings.startup_budget_ms, elapsed)) text += " over budget";
+        flash_status(b, text);
+    }
+}
+
+void sample_memory(Browser& b) {
+    PROCESS_MEMORY_COUNTERS counters = {};
+    counters.cb = sizeof(counters);
+    std::int64_t self_bytes = GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))
+        ? static_cast<std::int64_t>(counters.WorkingSetSize)
+        : 0;
+
+    std::int64_t children_bytes = 0;
+    DWORD self_id = GetCurrentProcessId();
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry = {};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                if (entry.th32ParentProcessID != self_id) continue;
+                HANDLE child = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, entry.th32ProcessID);
+                if (!child) continue;
+                PROCESS_MEMORY_COUNTERS child_counters = {};
+                child_counters.cb = sizeof(child_counters);
+                if (GetProcessMemoryInfo(child, &child_counters, sizeof(child_counters))) {
+                    children_bytes += static_cast<std::int64_t>(child_counters.WorkingSetSize);
+                }
+                CloseHandle(child);
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+    }
+
+    b.memory_bytes = self_bytes + children_bytes;
+    bool over = mustela::ceiling_exceeded(b.settings.memory_ceiling_mb, b.memory_bytes);
+    record_perf(b, "memory", 0.0, b.memory_bytes, "rss");
+    if (over != b.memory_over) {
+        b.memory_over = over;
+        refresh_status(b);
+    }
+}
+
+void apply_process_model(WKContextRef context, const std::string& name) {
+    WKProcessModel model = mustela::process_model_from(name) == mustela::ProcessModel::Shared
+        ? kWKProcessModelSharedSecondaryProcess
+        : kWKProcessModelMultipleSecondaryProcesses;
+    WKContextSetProcessModel(context, model);
 }
 
 #pragma warning(push)
@@ -373,6 +468,9 @@ std::string compose_status(Browser& b) {
     text += std::string("cookies ") + mustela::cookie_policy_name(b.privacy.cookies);
     if (b.privacy.hardening.tracking_prevention) text += " · itp";
     if (b.privacy.fingerprint.active()) text += " · fp";
+    if (b.memory_over) {
+        text += " · mem " + std::to_string(static_cast<int>(b.memory_bytes / (1024 * 1024))) + " MB";
+    }
     return text;
 }
 
@@ -490,6 +588,11 @@ void did_change_can_go_forward(const void* client_info) {
     on_tab_state_changed(tab);
 }
 
+void did_start_provisional_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    tab.load.start(mustela::Stopwatch::now_ms());
+}
+
 void did_commit_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* client_info) {
     WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
     if (!browser) return;
@@ -502,12 +605,17 @@ void did_finish_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* cl
     if (browser->privacy.records_history(tab.privacy)) {
         browser->history->record(tab.uri, tab.title, static_cast<std::int64_t>(std::time(nullptr)));
     }
+    double elapsed = tab.load.stop(mustela::Stopwatch::now_ms());
+    if (elapsed >= 0.0) {
+        record_perf(*browser, "pageload", elapsed, 0, tab.uri);
+    }
     on_tab_state_changed(tab);
 }
 
 void did_fail_provisional_navigation(WKPageRef, WKNavigationRef, WKErrorRef, WKTypeRef, const void* client_info) {
     WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
     if (!browser) return;
+    tab.load.cancel();
     on_tab_state_changed(tab);
     flash_status(*browser, "load failed");
 }
@@ -527,6 +635,7 @@ void set_page_clients(WinTab& tab) {
     WKPageNavigationClientV3 navigation = {};
     navigation.base.version = 3;
     navigation.base.clientInfo = &tab;
+    navigation.didStartProvisionalNavigation = did_start_provisional_navigation;
     navigation.didCommitNavigation = did_commit_navigation;
     navigation.didFinishNavigation = did_finish_navigation;
     navigation.didFailProvisionalNavigation = did_fail_provisional_navigation;
@@ -804,6 +913,14 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
             else SetFocus(b.url_entry);
             return 0;
         }
+        case WM_PAINT: {
+            PAINTSTRUCT paint = {};
+            HDC dc = BeginPaint(wnd, &paint);
+            EndPaint(wnd, &paint);
+            (void)dc;
+            mark_startup(b);
+            return 0;
+        }
         case WM_TIMER:
             if (wparam == TIMER_FLASH) {
                 KillTimer(wnd, TIMER_FLASH);
@@ -813,6 +930,9 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
             if (wparam == TIMER_RELOAD) {
                 KillTimer(wnd, TIMER_RELOAD);
                 reload_settings_and_policies(b);
+            }
+            if (wparam == TIMER_MEMORY) {
+                sample_memory(b);
             }
             return 0;
         case WM_APP_RELOAD_CHANGED:
@@ -829,7 +949,7 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
         case WM_COMMAND: {
             WORD id = LOWORD(wparam);
             WORD code = HIWORD(wparam);
-            if (id == ID_URL && code == EN_RETURN) {
+            if (id == ID_URL && code == ID_URL_ENTER) {
                 load_url_text(b, to_utf8(get_window_text(b.url_entry)));
                 SetFocus(b.url_entry);
                 return 0;
@@ -908,6 +1028,7 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
             }
             KillTimer(wnd, TIMER_FLASH);
             KillTimer(wnd, TIMER_RELOAD);
+            KillTimer(wnd, TIMER_MEMORY);
             PostQuitMessage(0);
             return 0;
         }
@@ -919,6 +1040,8 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
 }
 
 int mustela_main(int argc, char** argv) {
+    double startup_entry_ms = mustela::Stopwatch::now_ms();
+
     INITCOMMONCONTROLSEX controls = {sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
     OleInitialize(nullptr);
@@ -939,15 +1062,18 @@ int mustela_main(int argc, char** argv) {
     Browser& b = *(browser = new Browser());
     b.settings = settings;
     b.privacy = privacy;
+    b.startup_entry_ms = startup_entry_ms;
     if (start_private && b.privacy.private_tabs_available) {
         b.privacy.default_private = TabPrivacy::Private;
     }
     b.sites = std::make_unique<SiteRules>(config_path("sites.toml"));
     b.sites->load();
     b.history = std::make_unique<mustela::HistoryStore>(profile_path("history.tsv"));
+    b.perf = std::make_unique<mustela::PerfLog>(profile_path("perf.jsonl"));
 
     WkHold context_configuration(WKContextConfigurationCreate());
     b.context = WKContextCreateWithConfiguration(static_cast<WKContextConfigurationRef>(context_configuration.ref));
+    apply_process_model(b.context, b.settings.process_model);
 
     create_dir_chain(profile_dir_wide());
     std::wstring profile = profile_dir_wide();
@@ -981,8 +1107,8 @@ int mustela_main(int argc, char** argv) {
     WNDCLASSW main_class = {};
     main_class.lpfnWndProc = main_proc;
     main_class.hInstance = GetModuleHandleW(nullptr);
-    main_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    main_class.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    main_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    main_class.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
     main_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     main_class.lpszClassName = L"MUSTELA_MAIN_WND";
     RegisterClassW(&main_class);
@@ -1008,6 +1134,7 @@ int mustela_main(int argc, char** argv) {
         140, 8, 28, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CLOSE_TAB)), GetModuleHandleW(nullptr), nullptr);
     b.url_entry = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
         176, 8, width - 292, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_URL)), GetModuleHandleW(nullptr), nullptr);
+    SetWindowSubclass(b.url_entry, url_edit_subclass, URL_SUBCLASS_ID, 0);
     b.new_tab_btn = CreateWindowExW(0, WC_BUTTONW, L"+", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         width - 112, 8, 28, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NEW_TAB)), GetModuleHandleW(nullptr), nullptr);
     b.private_toggle = CreateWindowExW(0, WC_BUTTONW, L"Private", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -1042,6 +1169,8 @@ int mustela_main(int argc, char** argv) {
 
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
+    sample_memory(b);
+    SetTimer(window, TIMER_MEMORY, 60000, nullptr);
 
     MSG message = {};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
