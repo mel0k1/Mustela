@@ -14,6 +14,7 @@
 #include "privacy.hpp"
 #include "site_rules.hpp"
 #include "tab.hpp"
+#include "url.hpp"
 
 int mustela_main(int argc, char** argv);
 
@@ -67,13 +68,6 @@ void open_site_rules_window(Browser& b);
 void clear_browsing_data(Browser& b);
 void apply_policies_to_tabs(Browser& b);
 void apply_fingerprint(Browser& b, WebKitWebView* view, const FingerprintPolicy& fp);
-
-std::string trim_copy(const std::string& s) {
-    size_t begin = s.find_first_not_of(" \t\r\n");
-    if (begin == std::string::npos) return "";
-    size_t end = s.find_last_not_of(" \t\r\n");
-    return s.substr(begin, end - begin + 1);
-}
 
 Tab* active_tab(Browser& b) {
     gint page = gtk_notebook_get_current_page(GTK_NOTEBOOK(b.notebook));
@@ -269,24 +263,6 @@ void deny_origin_cookies(Browser& b, const std::string& uri) {
     g_list_free(origins);
 }
 
-std::string normalize_url(const std::string& input, const std::string& search_template) {
-    std::string text = trim_copy(input);
-    if (text.empty()) return "";
-    if (text.find("://") != std::string::npos) return text;
-
-    bool host_like = text.rfind("localhost", 0) == 0 ||
-                     (text.find('.') != std::string::npos && text.find(' ') == std::string::npos);
-    if (host_like) return "https://" + text;
-
-    gchar* escaped = g_uri_escape_string(text.c_str(), nullptr, TRUE);
-    std::string query = escaped ? escaped : "";
-    g_free(escaped);
-
-    size_t slot = search_template.find("%s");
-    if (slot == std::string::npos) return search_template;
-    return search_template.substr(0, slot) + query + search_template.substr(slot + 2);
-}
-
 void on_destroy(GtkWidget*, gpointer) {
     if (browser) {
         gint width = 0;
@@ -430,7 +406,7 @@ void on_url_activate(GtkEntry*, gpointer) {
     Tab* tab = active_tab(*browser);
     if (!tab) return;
     const gchar* text = gtk_entry_get_text(GTK_ENTRY(browser->url_entry));
-    std::string url = normalize_url(text, browser->settings.search_template);
+    std::string url = mustela::normalize_url(text, browser->settings.search_template);
     if (!url.empty()) webkit_web_view_load_uri(tab->view(), url.c_str());
 }
 
