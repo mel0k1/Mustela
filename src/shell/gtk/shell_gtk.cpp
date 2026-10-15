@@ -21,6 +21,7 @@ namespace {
 
 using mustela::CookiePolicy;
 using mustela::DataKind;
+using mustela::FingerprintPolicy;
 using mustela::Hardening;
 using mustela::PrivacyPolicy;
 using mustela::Settings;
@@ -50,6 +51,8 @@ struct Browser {
     GFileMonitor* sites_monitor = nullptr;
     guint settings_reload_pending = 0;
     guint sites_reload_pending = 0;
+    WebKitUserContentFilterStore* filter_store = nullptr;
+    WebKitUserContentFilter* fonts_filter = nullptr;
     std::vector<std::unique_ptr<Tab>> tabs;
 };
 
@@ -62,6 +65,8 @@ void on_close_tab_clicked(GtkButton*, gpointer user_data);
 void open_history_window(Browser& b);
 void open_site_rules_window(Browser& b);
 void clear_browsing_data(Browser& b);
+void apply_policies_to_tabs(Browser& b);
+void apply_fingerprint(Browser& b, WebKitWebView* view, const FingerprintPolicy& fp);
 
 std::string trim_copy(const std::string& s) {
     size_t begin = s.find_first_not_of(" \t\r\n");
@@ -111,6 +116,7 @@ void refresh_status(Browser& b) {
     if (tab && tab->is_private()) text = "private · ";
     text += std::string("cookies ") + mustela::cookie_policy_name(b.privacy.cookies);
     if (b.privacy.hardening.tracking_prevention) text += " · itp";
+    if (b.privacy.fingerprint.active()) text += " · fp";
     gtk_label_set_text(GTK_LABEL(b.status_label), text.c_str());
 }
 
@@ -196,6 +202,7 @@ void apply_view_policy(Browser& b, WebKitWebView* view, const std::string& uri) 
     mustela::SiteDecision decision = mustela::resolve_site(b.privacy, *b.sites, uri);
     WebKitSettings* settings = webkit_web_view_get_settings(view);
     g_object_set(settings, "enable-javascript", decision.javascript ? TRUE : FALSE, nullptr);
+    apply_fingerprint(b, view, decision.fingerprint);
 }
 
 void apply_policies_to_tabs(Browser& b) {
@@ -203,6 +210,45 @@ void apply_policies_to_tabs(Browser& b) {
         harden_view(tab->view(), b.privacy.hardening);
         apply_view_policy(b, tab->view(), tab->uri());
     }
+}
+
+void add_user_script(WebKitUserContentManager* manager, const std::string& source) {
+    WebKitUserScript* script = webkit_user_script_new(source.c_str(),
+        WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
+    webkit_user_content_manager_add_script(manager, script);
+    webkit_user_script_unref(script);
+}
+
+void apply_fingerprint(Browser& b, WebKitWebView* view, const FingerprintPolicy& fp) {
+    WebKitUserContentManager* manager = webkit_web_view_get_user_content_manager(view);
+    webkit_user_content_manager_remove_all_scripts(manager);
+    webkit_user_content_manager_remove_all_filters(manager);
+    if (fp.block_webgl) add_user_script(manager, mustela::fp_scripts::WEBGL_BLOCK);
+    if (fp.block_canvas_readback) add_user_script(manager, mustela::fp_scripts::CANVAS_BLANK);
+    if (fp.referrer != mustela::ReferrerTrim::Off) {
+        add_user_script(manager, mustela::fingerprint_referrer_script(fp.referrer));
+    }
+    if (fp.block_remote_fonts && b.fonts_filter) {
+        webkit_user_content_manager_add_filter(manager, b.fonts_filter);
+    }
+}
+
+void on_fonts_filter_saved(GObject* object, GAsyncResult* result, gpointer) {
+    GError* error = nullptr;
+    WebKitUserContentFilter* filter = webkit_user_content_filter_store_save_finish(
+        WEBKIT_USER_CONTENT_FILTER_STORE(object), result, &error);
+    if (error) {
+        g_error_free(error);
+        if (browser) flash_status("font filter failed");
+        return;
+    }
+    if (!browser) {
+        webkit_user_content_filter_unref(filter);
+        return;
+    }
+    if (browser->fonts_filter) webkit_user_content_filter_unref(browser->fonts_filter);
+    browser->fonts_filter = filter;
+    apply_policies_to_tabs(*browser);
 }
 
 void on_origin_cookies_removed(GObject* object, GAsyncResult* result, gpointer) {
@@ -253,6 +299,8 @@ void on_destroy(GtkWidget*, gpointer) {
         g_free(path);
         g_clear_object(&browser->settings_monitor);
         g_clear_object(&browser->sites_monitor);
+        g_clear_object(&browser->filter_store);
+        if (browser->fonts_filter) webkit_user_content_filter_unref(browser->fonts_filter);
     }
     gtk_main_quit();
 }
@@ -548,7 +596,8 @@ void open_history_window(Browser& b) {
 enum RuleCols {
     COL_HOST,
     COL_JS,
-    COL_COOKIES
+    COL_COOKIES,
+    COL_FP
 };
 
 enum RuleAction {
@@ -557,6 +606,9 @@ enum RuleAction {
     RULE_JS_DEFAULT,
     RULE_COOKIES_BLOCK,
     RULE_COOKIES_DEFAULT,
+    RULE_FP_EXEMPT,
+    RULE_FP_STRICT,
+    RULE_FP_DEFAULT,
     RULE_REMOVE
 };
 
@@ -569,7 +621,8 @@ void reload_rules_model(GtkListStore* store) {
         gtk_list_store_set(store, &iter,
             COL_HOST, entry.host.c_str(),
             COL_JS, mustela::site_rule_name(entry.policy.javascript),
-            COL_COOKIES, mustela::site_rule_name(entry.policy.cookies), -1);
+            COL_COOKIES, mustela::site_rule_name(entry.policy.cookies),
+            COL_FP, mustela::site_rule_name(entry.policy.fingerprint), -1);
     }
 }
 
@@ -607,6 +660,9 @@ void on_rule_action(GtkButton*, gpointer user_data) {
             case RULE_JS_DEFAULT: policy.javascript = mustela::SiteRule::Default; break;
             case RULE_COOKIES_BLOCK: policy.cookies = mustela::SiteRule::Deny; break;
             case RULE_COOKIES_DEFAULT: policy.cookies = mustela::SiteRule::Default; break;
+            case RULE_FP_EXEMPT: policy.fingerprint = mustela::SiteRule::Allow; break;
+            case RULE_FP_STRICT: policy.fingerprint = mustela::SiteRule::Deny; break;
+            case RULE_FP_DEFAULT: policy.fingerprint = mustela::SiteRule::Default; break;
             default: break;
         }
         b.sites->set(host, policy);
@@ -637,7 +693,7 @@ void open_site_rules_window(Browser& b) {
     gtk_window_set_transient_for(GTK_WINDOW(window), GTK_WINDOW(b.window));
     g_signal_connect(window, "destroy", G_CALLBACK(on_rules_window_destroy), nullptr);
 
-    GtkListStore* store = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkListStore* store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     b.rules_store = store;
     reload_rules_model(store);
 
@@ -651,6 +707,7 @@ void open_site_rules_window(Browser& b) {
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Host", renderer, "text", COL_HOST, nullptr);
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "JavaScript", renderer, "text", COL_JS, nullptr);
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Cookies", renderer, "text", COL_COOKIES, nullptr);
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Fingerprint", renderer, "text", COL_FP, nullptr);
     gtk_tree_view_column_set_expand(gtk_tree_view_get_column(GTK_TREE_VIEW(tree), COL_HOST), TRUE);
 
     GtkWidget* scroll = gtk_scrolled_window_new(nullptr, nullptr);
@@ -667,20 +724,29 @@ void open_site_rules_window(Browser& b) {
         {"JS default", RULE_JS_DEFAULT},
         {"Cookies block", RULE_COOKIES_BLOCK},
         {"Cookies default", RULE_COOKIES_DEFAULT},
+        {"Fingerprint exempt", RULE_FP_EXEMPT},
+        {"Fingerprint strict", RULE_FP_STRICT},
+        {"Fingerprint default", RULE_FP_DEFAULT},
         {"Remove", RULE_REMOVE}
     };
 
-    GtkWidget* controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    for (const RuleButton& spec : buttons) {
-        GtkWidget* btn = gtk_button_new_with_label(spec.label);
+    GtkWidget* controls = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget* rows[2] = {
+        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4),
+        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4)
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(buttons); ++i) {
+        GtkWidget* btn = gtk_button_new_with_label(buttons[i].label);
         g_signal_connect(btn, "clicked", G_CALLBACK(on_rule_action),
-            reinterpret_cast<gpointer>(static_cast<std::intptr_t>(spec.action)));
-        gtk_box_pack_start(GTK_BOX(controls), btn, FALSE, FALSE, 0);
+            reinterpret_cast<gpointer>(static_cast<std::intptr_t>(buttons[i].action)));
+        gtk_box_pack_start(GTK_BOX(rows[i < 5 ? 0 : 1]), btn, FALSE, FALSE, 0);
     }
 
     GtkWidget* hint = gtk_label_new("no selection = current site");
     gtk_label_set_xalign(GTK_LABEL(hint), 1.0f);
-    gtk_box_pack_end(GTK_BOX(controls), hint, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(rows[1]), hint, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(controls), rows[0], FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(controls), rows[1], FALSE, FALSE, 0);
 
     GtkWidget* layout = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_container_set_border_width(GTK_CONTAINER(layout), 4);
@@ -794,6 +860,17 @@ int mustela_main(int argc, char** argv) {
         g_free(history_path);
     }
 
+    gchar* filters_dir = g_build_filename(profile_dir, "filters", nullptr);
+    g_mkdir_with_parents(filters_dir, 0700);
+    browser->filter_store = webkit_user_content_filter_store_new(filters_dir);
+    g_free(filters_dir);
+    static const char fonts_filter_json[] =
+        "[{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"font\"]},\"action\":{\"type\":\"block\"}}]";
+    GBytes* fonts_source = g_bytes_new_static(fonts_filter_json, sizeof(fonts_filter_json) - 1);
+    webkit_user_content_filter_store_save(browser->filter_store, "block-remote-fonts", fonts_source,
+        nullptr, on_fonts_filter_saved, nullptr);
+    g_bytes_unref(fonts_source);
+
     WebKitWebsiteDataManager* data_manager =
         webkit_website_data_manager_new("base-data-directory", profile_dir, nullptr);
     webkit_website_data_manager_set_itp_enabled(data_manager,
@@ -837,7 +914,7 @@ int mustela_main(int argc, char** argv) {
     gtk_widget_set_margin_end(browser->status_label, 6);
     gtk_widget_set_valign(browser->status_label, GTK_ALIGN_CENTER);
     gtk_widget_set_tooltip_text(browser->status_label,
-        "Cookie policy and tracking prevention. Ctrl+Shift+Del clears browsing data");
+        "Cookie policy, tracking prevention and fingerprint budget. Ctrl+Shift+Del clears browsing data");
     GtkWidget* new_tab_btn = gtk_button_new_from_icon_name("tab-new-symbolic", GTK_ICON_SIZE_BUTTON);
 
     GtkWidget* toolbar_buttons[] = {browser->back_btn, browser->forward_btn, browser->reload_btn, new_tab_btn};
