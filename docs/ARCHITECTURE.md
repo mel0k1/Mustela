@@ -8,7 +8,7 @@ Mustela is a thin, opinionated layer over WebKit. The engine core is upstream We
 +-----------------------------+
 | Kiwi browser (UI)           |   separate repository: github.com/mel0k1/Kiwi
 +-----------------------------+
-| mustela-core                |   settings, privacy policy, browsing-data kinds, history; later: per-site rules
+| mustela-core                |   settings, privacy policy, browsing-data kinds, site rules, history; later: profiles
 +-----------------------------+
 | mustela-shell               |   engine test harness and playground, not the product
 +-----------------------------+
@@ -20,12 +20,12 @@ Mustela is a thin, opinionated layer over WebKit. The engine core is upstream We
 
 | Port | Platform | WebKit flavor  | Status                    |
 |------|----------|----------------|---------------------------|
-| gtk  | Linux    | WebKitGTK 2.4x | working — tabs, url bar, privacy policies |
+| gtk  | Linux    | WebKitGTK 2.4x | working — tabs, url bar, privacy policies, site rules |
 | win  | Windows  | WinCairo       | stub                      |
 
 Each port lives in its own directory under `src/shell/` and exposes the same entry point (`mustela_main`). Platform selection happens in CMake at configure time, so port sources are never mixed in one build.
 
-`mustela-core` is plain C++17 with no UI or WebKit dependencies: both ports link it, and it stays unit-testable. Privacy decisions go through `PrivacyPolicy` in the core — a port never decides privacy on its own, it only asks. Cookie accept policy, tracking prevention and hardening switches come from the same policy object; the ports translate it into WebKit calls. Browsing-data kinds (`DataKind`, `ClearRequest`) describe what "clear site data" means without WebKit types; the ports map them onto `WebKitWebsiteDataTypes`. History storage (`HistoryStore`) follows the same rule: the policy decides what gets recorded, private tabs never reach the store.
+`mustela-core` is plain C++17 with no UI or WebKit dependencies: both ports link it, and it stays unit-testable. Privacy decisions go through `PrivacyPolicy` in the core — a port never decides privacy on its own, it only asks. Cookie accept policy, tracking prevention and hardening switches come from the same policy object; the ports translate it into WebKit calls. Browsing-data kinds (`DataKind`, `ClearRequest`) describe what "clear site data" means without WebKit types; the ports map them onto `WebKitWebsiteDataTypes`. Per-site overrides (`SiteRules`, `resolve_site`) resolve a host against the global policy in one call — subdomain matching and rule precedence included — which is the exact surface the Kiwi browser will drive. History storage (`HistoryStore`) follows the same rule: the policy decides what gets recorded, private tabs never reach the store.
 
 The product browser built on top of Mustela is [Kiwi](https://github.com/mel0k1/Kiwi) — a separate repository with its own UI and roadmap. Everything in `mustela-shell` is a test harness for the engine APIs Kiwi will consume.
 

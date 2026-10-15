@@ -53,6 +53,22 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 
 Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead.
 
+Both `settings.toml` and `sites.toml` are watched while the browser runs — edits apply to open tabs without a restart.
+
+### Site rules
+
+Per-host overrides live in `~/.config/mustela/sites.toml`:
+
+```toml
+[example.org]
+javascript = "deny"
+
+[tracker.example.org]
+cookies = "deny"
+```
+
+A rule for a domain covers its subdomains (`example.org` matches `www.example.org`). The same rules are editable at runtime in the site-rules window (`Ctrl+Shift+S`): buttons act on the selected row, or on the current site when nothing is selected.
+
 ## Shortcuts
 
 | Keys | Action |
@@ -63,6 +79,7 @@ Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profi
 | Ctrl+L | focus the address bar |
 | Ctrl+H | history window |
 | Ctrl+Shift+Del | clear browsing data (cookies, cache, storage, IndexedDB) |
+| Ctrl+Shift+S | site rules window |
 | Ctrl+R / F5 | reload |
 | Alt+Left / Alt+Right | back / forward |
 | Escape | stop loading |

@@ -46,6 +46,27 @@ Applied to every web view at creation time:
 
 `Ctrl+Shift+Del` clears cookies, memory and disk cache, local/session storage and IndexedDB for both contexts at once. The kinds live in the core as `DataKind` flags and `ClearRequest`, so a future UI can offer granular clear with a time range.
 
+### Per-site overrides
+
+`~/.config/mustela/sites.toml` overrides the global policy per host:
+
+```toml
+[example.org]
+javascript = "deny"
+
+[tracker.example.org]
+cookies = "deny"
+```
+
+- JavaScript supports `allow` and `deny`; the site rule wins over `privacy.javascript`.
+- Cookies support `deny`: after every load of that host its cookies are removed, so no session survives. `allow` is intentionally not offered — WebKit applies accept policies globally and Mustela does not fake per-domain behavior it cannot enforce.
+- A rule for `example.org` also covers `www.example.org` and deeper subdomains; the nearest matching rule wins.
+- Resolution lives in the core (`resolve_site`) and is the exact API the Kiwi browser will drive with its own UI. The shell demonstrates it with a site-rules window (`Ctrl+Shift+S`); buttons apply to the selected row, or to the current site when nothing is selected.
+
+### Hot reload
+
+`settings.toml` and `sites.toml` are watched while the shell runs. Edits apply within a fraction of a second: the cookie policy re-applies to both contexts, hardening and per-site rules re-apply to every open tab, turning history on recreates its store. ITP may require a restart to fully apply — WebKit expects it to be configured before the profile is used.
+
 ### History
 
 History is stored by the core (`HistoryStore`) inside the default profile. Private tabs never reach it — `PrivacyPolicy::records_history` returns false for them — and `privacy.history_enabled = false` turns recording off entirely.
@@ -58,4 +79,4 @@ History is stored by the core (`HistoryStore`) inside the default profile. Priva
 
 ## Next steps
 
-Per-site overrides on top of the global policy (allowlist of domains allowed to set cookies and storage), more fingerprint-surface switches (WebGL, canvas, remote fonts, referrer trimming) — see stage M2 of the [roadmap](ROADMAP.md).
+Fingerprint-surface switches (WebGL, canvas, remote fonts, referrer trimming) with a measurable budget — see stage M2.5 of the [roadmap](ROADMAP.md).
