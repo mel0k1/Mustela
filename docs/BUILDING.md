@@ -91,19 +91,41 @@ A rule for a domain covers its subdomains (`example.org` matches `www.example.or
 | Alt+Left / Alt+Right | back / forward |
 | Escape | stop loading |
 
-## Windows (in progress)
+Linux shortcuts apply to the GTK port. The Windows port shares Ctrl+T, Ctrl+W, Ctrl+L, Ctrl+R, F5, Ctrl+H, Ctrl+Shift+Del, Alt+Left and Alt+Right; Escape and Ctrl+Shift+S (site rules window) are GTK-only for now.
 
-The Windows port targets the upstream [WinCairo](https://github.com/WebKit/WebKit) flavor of WebKit. The port source lives in `src/shell/win/` and currently builds into a placeholder binary.
+## Tests
 
-Planned path:
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
 
-1. Build WinCairo WebKit from upstream (WebKit wiki: BuildingCairoOnWindows).
-2. Point CMake at the built WebKit libraries.
-3. Replace the stub in `src/shell/win/shell_win.cpp` with a real shell over the WinCairo API.
+`mustela_core_tests` covers settings round-trips (including partial files and fallbacks), privacy mapping and gating invariants, `host_from_uri` parsing, site-rule suffix matching and persistence, `resolve_site` precedence, history escaping/limits/dedup, fingerprint presets and referrer substitution, browsing-data kinds and URL normalization. It runs on every push in CI on both Linux and Windows.
 
-Until then, CMake on Windows configures and builds the stub with MSVC:
+## Windows
+
+The Windows port embeds the upstream [WinCairo](https://github.com/WebKit/WebKit) flavor of WebKit through its C API (`WebKit2_C.h` umbrella plus the win `WKView` and data-store headers). The shell source lives in `src/shell/win/shell_win.cpp`.
+
+Two paths:
+
+1. **Without a WebKit SDK** CMake still configures and builds the core, the tests and a placeholder shell:
 
 ```powershell
 cmake -S . -B build
 cmake --build build --config Release
+ctest --test-dir build --build-config Release --output-on-failure
 ```
+
+2. **With a WinCairo SDK** the real shell builds. Build WebKit from upstream first (WebKit wiki: BuildingCairoOnWindows), then point CMake at a directory containing the WebKit C API headers and import libraries:
+
+```powershell
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMUSTELA_WEBKIT_SDK=path/to/sdk
+cmake --build build --config Release
+```
+
+The SDK directory is expected to have `include/WebKit/*.h` (the C API headers from the WebKit source tree: `Source/WebKit/UIProcess/API/C`, `Source/WebKit/UIProcess/API/C/win`, `Source/WebKit/Shared/API/c`) and `lib/` with the WebKit import libraries (`WebKit`, `WebCore`, `WTF`, `JavaScriptCore`, `PAL`). At runtime the WebKit DLLs, helper processes and the WinCairo dependency DLLs (from `WinCairoRequirements`) must sit next to `mustela.exe`.
+
+CI compiles `shell_win.cpp` against 80 pinned upstream headers on every push (job `windows shell`), so the Windows sources are never farther than one commit from reality. The header set is listed in `scripts/win-headers.txt` and fetched by `scripts/fetch-win-headers.ps1`.
+
+Profile data on Windows lives under `%APPDATA%\mustela`: `settings.toml` and `sites.toml` at the root, `profiles\default\` for cookies, cache, storage and the compiled font filter. Both TOML files are watched with `ReadDirectoryChangesW` — edits apply live, same as on Linux.

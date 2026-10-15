@@ -38,11 +38,20 @@ Milestones are capability-based; dates are intentionally not assigned.
 - A measurable fingerprint budget documented in PRIVACY.md: surface-by-surface trade-offs, presets and honest limits. (done)
 - Per-site fingerprint rules on top of `SiteRules`: `allow` exempts a host, `deny` forces the strict set. (done)
 
-## M3 — Windows port (next)
+## M3 — Windows port (done)
 
-- WinCairo build scripted end-to-end from a clean machine.
-- Shell and privacy-core parity with the GTK port.
-- CI parity once both platforms build green.
+- Shell on the upstream WinCairo flavor of WebKit through its C API: tabs, URL bar with search fallback, window geometry persistence. (done)
+- Privacy-core parity: cookie accept policy, ITP, hardening switches, per-site overrides, fingerprint budget via user scripts and a compiled content filter, history, clear-browsing-data, settings hot-reload. (done)
+- Persistent profile under `%APPDATA%\mustela`, private tabs on non-persistent data stores. (done)
+- Windows shell compiled against pinned upstream WebKit C API headers on every push. (done)
+
+Known gaps, tracked for the next pass: per-site cookie denial works through the global accept policy (the C API has no per-origin cookie wipe on Windows), clear-data covers cookies and storage but not the disk cache, and there is no site-rules window — edit `sites.toml`, hot-reload applies it live.
+
+## CI (done)
+
+- Linux: full GTK shell build against `webkit2gtk-4.1` plus the core test suite on every push. (done)
+- Windows: core and tests under MSVC. (done)
+- Windows shell syntax check against 80 pinned upstream WebKit C API headers (`scripts/fetch-win-headers.ps1`). (done)
 
 ## M4 — Performance
 

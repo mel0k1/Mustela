@@ -2,6 +2,25 @@
 
 Privacy in Mustela is a configuration surface, not a slogan. The long-term rule: anything that stores, sends or fingerprints must be explicit, visible and switchable.
 
+## Platform parity (v0.7)
+
+The privacy core is one codebase; ports only translate it into WebKit calls. The GTK port (WebKitGTK) is the reference implementation. The Windows port (WinCairo over the WebKit C API) applies the same `PrivacyPolicy`, the same `sites.toml` and the same script payloads:
+
+| Surface | GTK port | Windows port |
+|---------|----------|--------------|
+| Persistent profile | `~/.local/share/mustela/profiles/default` | `%APPDATA%\mustela\profiles\default` with explicit per-kind directories |
+| Private tabs | shared ephemeral context | per-tab non-persistent `WKWebsiteDataStore` |
+| Cookie accept policy | `WebKitCookieManager` on both contexts | `WKHTTPCookieStoreSetHTTPCookieAcceptPolicy` on every store |
+| ITP | before context creation | `WKWebsiteDataStoreSetResourceLoadStatisticsEnabled` on every store |
+| Hardening switches | `WebKitSettings` properties | `WKPreferences` setters (hyperlink auditing and DNS prefetching through deprecated-but-functional C API entries) |
+| Per-site JavaScript and fingerprint | `resolve_site` + user content manager | same `resolve_site` + `WKUserContentController` |
+| Fingerprint payloads | `WebKitUserScript` + compiled filter | `WKUserScript` + `WKUserContentExtensionStore` filter — same JSON, same scripts |
+| Per-site cookie denial | origin wipe on load | global accept policy only — the C API has no per-origin cookie wipe; noted as a known gap |
+| Clear browsing data | full kind mapping | cookies and storage; disk cache not reachable through the C API yet |
+| History, settings, sites, hot-reload | GFileMonitor | `ReadDirectoryChangesW` |
+
+Everything above the translation layer — what counts as private, what gets recorded, what a site is allowed to do — is decided once, in the core, and both ports inherit it. New privacy switches land in the core first; ports follow.
+
 ## Principles
 
 1. **No silent traffic.** The engine contacts nothing beyond the URIs the user opens. No telemetry, no update pings, no safe-browsing calls unless explicitly enabled.
@@ -120,4 +139,4 @@ History is stored by the core (`HistoryStore`) inside the default profile. Priva
 
 ## Next steps
 
-Windows parity and performance budgets — see the [roadmap](ROADMAP.md).
+Performance budgets, per-origin cookie wipe on Windows when the C API grows one, and the Kiwi browser driving this whole surface with a real UI — see the [roadmap](ROADMAP.md).
