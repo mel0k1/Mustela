@@ -1,9 +1,1073 @@
 #include <windows.h>
+#include <commctrl.h>
+#include <shlobj.h>
 
-int mustela_main(int, char**) {
-    MessageBoxA(nullptr,
-                "Mustela Windows port is under construction.\nTarget: WinCairo flavor of WebKit.",
-                "Mustela",
-                MB_OK | MB_ICONINFORMATION);
-    return 1;
+#include <atomic>
+#include <cstring>
+#include <ctime>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "browsing_data.hpp"
+#include "config.hpp"
+#include "fingerprint.hpp"
+#include "fingerprint_scripts.hpp"
+#include "history.hpp"
+#include "privacy.hpp"
+#include "site_rules.hpp"
+#include "url.hpp"
+
+#include <WebKit/WebKit2_C.h>
+#include <WebKit/WKView.h>
+#include <WebKit/WKContextConfigurationRef.h>
+#include <WebKit/WKWebsiteDataStoreRef.h>
+#include <WebKit/WKWebsiteDataStoreConfigurationRef.h>
+#include <WebKit/WKHTTPCookieStoreRef.h>
+#include <WebKit/WKCookieManager.h>
+#include <WebKit/WKPageStateClient.h>
+#include <WebKit/WKPageNavigationClient.h>
+#include <WebKit/WKPreferencesRefPrivate.h>
+#include <WebKit/WKUserContentExtensionStoreRef.h>
+
+int mustela_main(int argc, char** argv);
+
+namespace {
+
+using mustela::CookiePolicy;
+using mustela::DataKind;
+using mustela::FingerprintPolicy;
+using mustela::Hardening;
+using mustela::PrivacyPolicy;
+using mustela::ReferrerTrim;
+using mustela::Settings;
+using mustela::SiteDecision;
+using mustela::SiteRules;
+using mustela::TabPrivacy;
+
+enum : WORD {
+    ID_BACK = 101,
+    ID_FORWARD = 102,
+    ID_RELOAD = 103,
+    ID_NEW_TAB = 104,
+    ID_CLOSE_TAB = 105,
+    ID_PRIVATE = 106,
+    ID_URL = 107,
+    ID_TABS = 108,
+    ID_STATUS = 109,
+    ID_CLEAR_DATA = 110,
+    ID_HISTORY = 111,
+    ID_HISTORY_LIST = 112,
+    ID_HISTORY_CLEAR = 113,
+    ID_ACC_URL = 114,
+    ID_ACC_NEW_TAB = 115,
+    ID_ACC_CLOSE_TAB = 116,
+    ID_ACC_RELOAD = 117,
+    ID_ACC_CLEAR_DATA = 118,
+    ID_ACC_HISTORY = 119,
+    ID_ACC_BACK = 120,
+    ID_ACC_FORWARD = 121
+};
+
+const UINT WM_APP_RELOAD_CHANGED = WM_APP + 1;
+const UINT TIMER_FLASH = 1;
+const UINT TIMER_RELOAD = 2;
+const UINT TIMER_WATCH = 3;
+
+std::wstring to_wide(const std::string& text) {
+    if (text.empty()) return std::wstring();
+    int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring wide(static_cast<size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), size);
+    return wide;
+}
+
+std::string to_utf8(const std::wstring& text) {
+    if (text.empty()) return std::string();
+    int size = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size, nullptr, nullptr);
+    return out;
+}
+
+struct WkHold {
+    WKTypeRef ref = nullptr;
+    explicit WkHold(WKTypeRef value) : ref(value) {}
+    ~WkHold() {
+        if (ref) WKRelease(ref);
+    }
+    WkHold(const WkHold&) = delete;
+    WkHold& operator=(const WkHold&) = delete;
+};
+
+WKStringRef make_wkstring(const std::string& text) {
+    return WKStringCreateWithUTF8CString(text.c_str());
+}
+
+std::string wkstring_to_std(WKStringRef value) {
+    if (!value) return std::string();
+    size_t size = WKStringGetMaximumUTF8CStringSize(value);
+    std::string out(size, '\0');
+    size_t copied = WKStringGetUTF8CString(value, out.data(), size);
+    if (copied > 0) out.resize(copied - 1);
+    else out.clear();
+    return out;
+}
+
+std::string wkurl_to_std(WKURLRef value) {
+    if (!value) return std::string();
+    WkHold hold(WKURLCopyString(value));
+    return wkstring_to_std(static_cast<WKStringRef>(hold.ref));
+}
+
+WKURLRef make_wkurl(const std::string& text) {
+    return WKURLCreateWithUTF8CString(text.c_str());
+}
+
+std::wstring get_window_text(HWND wnd) {
+    int length = GetWindowTextLengthW(wnd);
+    if (length <= 0) return std::wstring();
+    std::wstring text(static_cast<size_t>(length), L'\0');
+    int copied = GetWindowTextW(wnd, text.data(), length + 1);
+    text.resize(static_cast<size_t>(copied > 0 ? copied : 0));
+    return text;
+}
+
+void create_dir_chain(const std::wstring& path) {
+    if (path.empty()) return;
+    std::wstring built;
+    size_t start = 0;
+    if (path.size() > 2 && path[1] == L':') start = 3;
+    while (start <= path.size()) {
+        size_t next = path.find(L'\\', start);
+        if (next == std::wstring::npos) next = path.size();
+        built = path.substr(0, next);
+        if (built.size() >= 3 && built.find(L'\\') != std::wstring::npos) {
+            CreateDirectoryW(built.c_str(), nullptr);
+        }
+        start = next + 1;
+    }
+}
+
+std::wstring app_base_dir() {
+    PWSTR roaming = nullptr;
+    std::wstring base;
+    if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &roaming) == S_OK && roaming) {
+        base = std::wstring(roaming) + L"\\mustela";
+        CoTaskMemFree(roaming);
+    } else {
+        base = L"mustela";
+    }
+    create_dir_chain(base);
+    return base;
+}
+
+std::string config_path(const char* name) {
+    return to_utf8(app_base_dir()) + "\\" + name;
+}
+
+std::wstring profile_dir_wide() {
+    return app_base_dir() + L"\\profiles\\default";
+}
+
+std::string profile_path(const char* name) {
+    return to_utf8(profile_dir_wide()) + "\\" + name;
+}
+
+struct WinTab;
+
+struct Browser {
+    Settings settings;
+    PrivacyPolicy privacy;
+    std::unique_ptr<SiteRules> sites;
+    std::unique_ptr<mustela::HistoryStore> history;
+
+    HWND window = nullptr;
+    HWND back_btn = nullptr;
+    HWND forward_btn = nullptr;
+    HWND reload_btn = nullptr;
+    HWND new_tab_btn = nullptr;
+    HWND close_tab_btn = nullptr;
+    HWND private_toggle = nullptr;
+    HWND url_entry = nullptr;
+    HWND tab_ctrl = nullptr;
+    HWND status_bar = nullptr;
+    HWND history_window = nullptr;
+    HWND history_list = nullptr;
+
+    WKContextRef context = nullptr;
+    WKWebsiteDataStoreRef persistent_store = nullptr;
+    WKUserContentExtensionStoreRef filter_store = nullptr;
+    WKUserContentFilterRef fonts_filter = nullptr;
+
+    std::vector<std::unique_ptr<WinTab>> tabs;
+    int active = -1;
+    std::vector<std::string> history_urls;
+
+    bool status_flash = false;
+    std::atomic<bool> watcher_stop{false};
+    HANDLE watcher_thread = nullptr;
+};
+
+struct WinTab {
+    WKPreferencesRef preferences = nullptr;
+    WKUserContentControllerRef content = nullptr;
+    WKWebsiteDataStoreRef store = nullptr;
+    bool owns_store = false;
+    WKViewRef view = nullptr;
+    WKPageRef page = nullptr;
+    TabPrivacy privacy = TabPrivacy::Normal;
+    std::string uri;
+    std::string title;
+};
+
+Browser* browser = nullptr;
+
+WinTab* active_tab(Browser& b) {
+    if (b.active < 0 || b.active >= static_cast<int>(b.tabs.size())) return nullptr;
+    return b.tabs[static_cast<size_t>(b.active)].get();
+}
+
+WinTab* tab_from_page(WKPageRef page) {
+    for (std::unique_ptr<WinTab>& tab : browser->tabs) {
+        if (tab->page == page) return tab.get();
+    }
+    return nullptr;
+}
+
+int tab_index(const Browser& b, const WinTab* tab) {
+    for (size_t i = 0; i < b.tabs.size(); ++i) {
+        if (b.tabs[i].get() == tab) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+WKHTTPCookieAcceptPolicy accept_policy_for(CookiePolicy policy) {
+    if (policy == CookiePolicy::Always) return kWKHTTPCookieAcceptPolicyAlways;
+    if (policy == CookiePolicy::Never) return kWKHTTPCookieAcceptPolicyNever;
+    return kWKHTTPCookieAcceptPolicyOnlyFromMainDocumentDomain;
+}
+
+void noop_store_callback(void*) {}
+
+void apply_cookie_policy(WKWebsiteDataStoreRef store, CookiePolicy policy) {
+    WKHTTPCookieStoreRef cookies = WKWebsiteDataStoreGetHTTPCookieStore(store);
+    WKHTTPCookieStoreSetHTTPCookieAcceptPolicy(cookies, accept_policy_for(policy), nullptr, noop_store_callback);
+}
+
+void apply_itp(WKWebsiteDataStoreRef store, bool enabled) {
+    WKWebsiteDataStoreSetResourceLoadStatisticsEnabled(store, enabled ? TRUE : FALSE);
+}
+
+#pragma warning(push)
+#pragma warning(disable : 4996)
+void harden_preferences(WKPreferencesRef preferences, const Hardening& hardening) {
+    WKPreferencesSetJavaScriptEnabled(preferences, hardening.javascript ? TRUE : FALSE);
+    WKPreferencesSetHyperlinkAuditingEnabled(preferences, hardening.hyperlink_auditing ? TRUE : FALSE);
+    WKPreferencesSetDNSPrefetchingEnabled(preferences, hardening.dns_prefetching ? TRUE : FALSE);
+    WKPreferencesSetMediaPlaybackRequiresUserGesture(preferences, hardening.autoplay_blocked ? TRUE : FALSE);
+}
+#pragma warning(pop)
+
+void add_user_script(WKUserContentControllerRef content, const std::string& source) {
+    WkHold text(make_wkstring(source));
+    WKUserScriptRef script = WKUserScriptCreateWithSource(static_cast<WKStringRef>(text.ref),
+        kWKInjectAtDocumentStart, false);
+    if (!script) return;
+    WKUserContentControllerAddUserScript(content, script);
+    WKRelease(script);
+}
+
+void apply_fingerprint(WinTab& tab, const FingerprintPolicy& fp) {
+    WKUserContentControllerRemoveAllUserScripts(tab.content);
+    WKUserContentControllerRemoveAllUserContentFilters(tab.content);
+    if (fp.block_webgl) add_user_script(tab.content, mustela::fp_scripts::WEBGL_BLOCK);
+    if (fp.block_canvas_readback) add_user_script(tab.content, mustela::fp_scripts::CANVAS_BLANK);
+    if (fp.referrer != ReferrerTrim::Off) {
+        add_user_script(tab.content, mustela::fingerprint_referrer_script(fp.referrer));
+    }
+    if (fp.block_remote_fonts && browser->fonts_filter) {
+        WKUserContentControllerAddUserContentFilter(tab.content, browser->fonts_filter);
+    }
+}
+
+void apply_view_policy(WinTab& tab, const std::string& uri) {
+    if (!browser || !browser->sites) return;
+    SiteDecision decision = mustela::resolve_site(browser->privacy, *browser->sites, uri);
+    WKPreferencesSetJavaScriptEnabled(tab.preferences, decision.javascript ? TRUE : FALSE);
+    apply_fingerprint(tab, decision.fingerprint);
+}
+
+void apply_policies_to_tabs(Browser& b) {
+    for (std::unique_ptr<WinTab>& tab : b.tabs) {
+        harden_preferences(tab->preferences, b.privacy.hardening);
+        apply_cookie_policy(tab->store, b.privacy.cookies);
+        apply_itp(tab->store, b.privacy.hardening.tracking_prevention);
+        apply_view_policy(*tab, tab->uri);
+    }
+}
+
+void on_fonts_filter_compiled(WKUserContentFilterRef filter, WKUserContentExtensionStoreResult result, void*) {
+    if (result != kWKUserContentExtensionStoreSuccess || !filter || !browser) return;
+    WKRetain(filter);
+    browser->fonts_filter = filter;
+    for (std::unique_ptr<WinTab>& tab : browser->tabs) {
+        std::string uri = tab->uri;
+        if (!uri.empty()) apply_view_policy(*tab, uri);
+    }
+}
+
+void compile_fonts_filter(Browser& b) {
+    static const char fonts_filter_json[] =
+        "[{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"font\"]},\"action\":{\"type\":\"block\"}}]";
+    WkHold json(make_wkstring(fonts_filter_json));
+    WkHold identifier(make_wkstring("block-remote-fonts"));
+    WKUserContentExtensionStoreCompile(b.filter_store, static_cast<WKStringRef>(identifier.ref),
+        static_cast<WKStringRef>(json.ref), nullptr, on_fonts_filter_compiled);
+}
+
+void clear_browsing_data(Browser& b) {
+    std::vector<WKWebsiteDataStoreRef> stores;
+    stores.push_back(b.persistent_store);
+    for (std::unique_ptr<WinTab>& tab : b.tabs) {
+        if (tab->owns_store) stores.push_back(tab->store);
+    }
+    for (WKWebsiteDataStoreRef store : stores) {
+        if (!store) continue;
+        WKHTTPCookieStoreRef cookies = WKWebsiteDataStoreGetHTTPCookieStore(store);
+        WKHTTPCookieStoreDeleteAllCookies(cookies, nullptr, noop_store_callback);
+        WKWebsiteDataStoreClearStorage(store, nullptr, noop_store_callback);
+    }
+}
+
+std::string tab_label(const WinTab& tab) {
+    std::string label;
+    if (tab.privacy == TabPrivacy::Private) label = "private · ";
+    label += tab.title.empty() ? tab.uri.empty() ? "New tab" : tab.uri : tab.title;
+    return label;
+}
+
+void update_tab_item(Browser& b, int index) {
+    WinTab& tab = *b.tabs[static_cast<size_t>(index)];
+    TCITEMW item = {};
+    item.mask = TCIF_TEXT;
+    std::wstring label = to_wide(tab_label(tab));
+    item.pszText = label.data();
+    SendMessageW(b.tab_ctrl, TCM_SETITEMW, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(&item));
+}
+
+void update_window_title(Browser& b) {
+    WinTab* tab = active_tab(b);
+    if (!tab || (tab->title.empty() && tab->uri.empty())) {
+        SetWindowTextW(b.window, L"Mustela");
+        return;
+    }
+    std::string title = tab->title.empty() ? tab->uri : tab->title;
+    SetWindowTextW(b.window, to_wide(title + " — Mustela").c_str());
+}
+
+std::string compose_status(Browser& b) {
+    WinTab* tab = active_tab(b);
+    std::string text;
+    if (tab && tab->privacy == TabPrivacy::Private) text = "private · ";
+    text += std::string("cookies ") + mustela::cookie_policy_name(b.privacy.cookies);
+    if (b.privacy.hardening.tracking_prevention) text += " · itp";
+    if (b.privacy.fingerprint.active()) text += " · fp";
+    return text;
+}
+
+void refresh_status(Browser& b) {
+    if (!b.status_bar) return;
+    std::string text = compose_status(b);
+    WinTab* tab = active_tab(b);
+    if (tab && tab->page && WKPageGetEstimatedProgress(tab->page) < 1.0) {
+        double progress = WKPageGetEstimatedProgress(tab->page);
+        text = "loading " + std::to_string(static_cast<int>(progress * 100.0)) + "% · " + text;
+    }
+    SendMessageW(b.status_bar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(to_wide(text).c_str()));
+}
+
+void flash_status(Browser& b, const std::string& text) {
+    if (!b.status_bar) return;
+    b.status_flash = true;
+    SendMessageW(b.status_bar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(to_wide(text).c_str()));
+    SetTimer(b.window, TIMER_FLASH, 3000, nullptr);
+}
+
+void refresh_chrome(Browser& b) {
+    WinTab* tab = active_tab(b);
+    if (tab) {
+        if (GetFocus() != b.url_entry) {
+            SetWindowTextW(b.url_entry, to_wide(tab->uri).c_str());
+        }
+        EnableWindow(b.back_btn, tab->page && WKPageCanGoBack(tab->page) ? TRUE : FALSE);
+        EnableWindow(b.forward_btn, tab->page && WKPageCanGoForward(tab->page) ? TRUE : FALSE);
+        EnableWindow(b.reload_btn, tab->page ? TRUE : FALSE);
+        EnableWindow(b.close_tab_btn, TRUE);
+        int index = tab_index(b, tab);
+        if (index >= 0) update_tab_item(b, index);
+    } else {
+        SetWindowTextW(b.url_entry, L"");
+        EnableWindow(b.back_btn, FALSE);
+        EnableWindow(b.forward_btn, FALSE);
+        EnableWindow(b.reload_btn, FALSE);
+        EnableWindow(b.close_tab_btn, FALSE);
+    }
+    update_window_title(b);
+    refresh_status(b);
+}
+
+void position_view(Browser& b, WinTab& tab) {
+    RECT client = {};
+    GetClientRect(b.window, &client);
+    RECT tab_area = client;
+    SendMessageW(b.tab_ctrl, TCM_ADJUSTRECT, FALSE, reinterpret_cast<LPARAM>(&tab_area));
+    SetWindowPos(WKViewGetWindow(tab.view), HWND_TOP,
+        tab_area.left, tab_area.top,
+        tab_area.right - tab_area.left, tab_area.bottom - tab_area.top, SWP_NOACTIVATE);
+}
+
+void switch_tab(Browser& b, int index) {
+    if (index < 0 || index >= static_cast<int>(b.tabs.size())) return;
+    if (b.active >= 0 && b.active < static_cast<int>(b.tabs.size()) && b.active != index) {
+        ShowWindow(WKViewGetWindow(b.tabs[static_cast<size_t>(b.active)]->view), SW_HIDE);
+    }
+    b.active = index;
+    SendMessageW(b.tab_ctrl, TCM_SETCURSEL, static_cast<WPARAM>(index), 0);
+    WinTab& tab = *b.tabs[static_cast<size_t>(index)];
+    position_view(b, tab);
+    ShowWindow(WKViewGetWindow(tab.view), SW_SHOW);
+    SetFocus(WKViewGetWindow(tab.view));
+    refresh_chrome(b);
+}
+
+void on_tab_state_changed(WinTab& tab) {
+    if (!browser) return;
+    int index = tab_index(*browser, &tab);
+    if (index >= 0) update_tab_item(*browser, index);
+    if (browser->active == index) refresh_chrome(*browser);
+}
+
+void did_change_title(const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!tab.page || !browser) return;
+    WkHold hold(WKPageCopyTitle(tab.page));
+    tab.title = wkstring_to_std(static_cast<WKStringRef>(hold.ref));
+    on_tab_state_changed(tab);
+}
+
+void did_change_active_url(const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!tab.page || !browser) return;
+    WkHold hold(WKPageCopyActiveURL(tab.page));
+    std::string uri = wkurl_to_std(static_cast<WKURLRef>(hold.ref));
+    if (uri == tab.uri) return;
+    tab.uri = uri;
+    if (!uri.empty()) apply_view_policy(tab, uri);
+    on_tab_state_changed(tab);
+}
+
+void did_change_is_loading(const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!tab.page || !browser) return;
+    if (WKPageGetEstimatedProgress(tab.page) >= 1.0) refresh_status(*browser);
+}
+
+void did_change_estimated_progress(const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!tab.page || !browser) return;
+    int index = tab_index(*browser, &tab);
+    if (browser->active == index) refresh_status(*browser);
+}
+
+void did_change_can_go_back(const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    on_tab_state_changed(tab);
+}
+
+void did_change_can_go_forward(const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    on_tab_state_changed(tab);
+}
+
+void did_commit_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!browser) return;
+    apply_view_policy(tab, tab.uri);
+}
+
+void did_finish_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!browser || tab.uri.empty()) return;
+    if (browser->privacy.records_history(tab.privacy)) {
+        browser->history->record(tab.uri, tab.title, static_cast<std::int64_t>(std::time(nullptr)));
+    }
+    on_tab_state_changed(tab);
+}
+
+void did_fail_provisional_navigation(WKPageRef, WKNavigationRef, WKErrorRef, WKTypeRef, const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!browser) return;
+    on_tab_state_changed(tab);
+    flash_status(*browser, "load failed");
+}
+
+void set_page_clients(WinTab& tab) {
+    WKPageStateClientV0 state = {};
+    state.base.version = 0;
+    state.base.clientInfo = &tab;
+    state.didChangeTitle = did_change_title;
+    state.didChangeActiveURL = did_change_active_url;
+    state.didChangeIsLoading = did_change_is_loading;
+    state.didChangeEstimatedProgress = did_change_estimated_progress;
+    state.didChangeCanGoBack = did_change_can_go_back;
+    state.didChangeCanGoForward = did_change_can_go_forward;
+    WKPageSetPageStateClient(tab.page, &state.base);
+
+    WKPageNavigationClientV3 navigation = {};
+    navigation.base.version = 3;
+    navigation.base.clientInfo = &tab;
+    navigation.didCommitNavigation = did_commit_navigation;
+    navigation.didFinishNavigation = did_finish_navigation;
+    navigation.didFailProvisionalNavigation = did_fail_provisional_navigation;
+    WKPageSetPageNavigationClient(tab.page, &navigation.base);
+}
+
+std::unique_ptr<WinTab> make_tab(TabPrivacy request) {
+    auto tab = std::make_unique<WinTab>();
+    tab->privacy = browser->privacy.tab_privacy(request);
+
+    tab->preferences = WKPreferencesCreate();
+    harden_preferences(tab->preferences, browser->privacy.hardening);
+
+    tab->content = WKUserContentControllerCreate();
+
+    if (tab->privacy == TabPrivacy::Private) {
+        tab->store = WKWebsiteDataStoreCreateNonPersistentDataStore();
+        tab->owns_store = true;
+    } else {
+        tab->store = browser->persistent_store;
+        tab->owns_store = false;
+    }
+
+    WkHold configuration(WKPageConfigurationCreate());
+    WKPageConfigurationSetContext(static_cast<WKPageConfigurationRef>(configuration.ref), browser->context);
+    WKPageConfigurationSetPreferences(static_cast<WKPageConfigurationRef>(configuration.ref), tab->preferences);
+    WKPageConfigurationSetUserContentController(static_cast<WKPageConfigurationRef>(configuration.ref), tab->content);
+    WKPageConfigurationSetWebsiteDataStore(static_cast<WKPageConfigurationRef>(configuration.ref), tab->store);
+
+    RECT rect = {};
+    tab->view = WKViewCreate(rect, static_cast<WKPageConfigurationRef>(configuration.ref), browser->window);
+    WKViewSetIsInWindow(tab->view, true);
+    tab->page = WKViewGetPage(tab->view);
+
+    set_page_clients(*tab);
+    apply_cookie_policy(tab->store, browser->privacy.cookies);
+    apply_itp(tab->store, browser->privacy.hardening.tracking_prevention);
+    apply_view_policy(*tab, tab->uri);
+
+    double dpi = static_cast<double>(GetDpiForWindow(browser->window));
+    if (dpi > 0) WKPageSetCustomBackingScaleFactor(tab->page, dpi / 96.0);
+
+    ShowWindow(WKViewGetWindow(tab->view), SW_HIDE);
+    return tab;
+}
+
+void navigate_tab(WinTab& tab, const std::string& url) {
+    if (url.empty()) return;
+    WkHold target(make_wkurl(url));
+    WKPageLoadURL(tab.page, static_cast<WKURLRef>(target.ref));
+}
+
+void load_url_text(Browser& b, const std::string& text) {
+    WinTab* tab = active_tab(b);
+    if (!tab) return;
+    std::string url = mustela::normalize_url(text, b.settings.search_template);
+    navigate_tab(*tab, url);
+}
+
+int open_tab(Browser& b, const std::string& url, TabPrivacy request) {
+    std::unique_ptr<WinTab> tab = make_tab(request);
+    WinTab* raw = tab.get();
+    b.tabs.push_back(std::move(tab));
+    int index = static_cast<int>(b.tabs.size()) - 1;
+
+    TCITEMW item = {};
+    item.mask = TCIF_TEXT;
+    std::wstring label = to_wide(tab_label(*raw));
+    item.pszText = label.data();
+    SendMessageW(b.tab_ctrl, TCM_INSERTITEMW, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(&item));
+
+    if (!url.empty()) navigate_tab(*raw, url);
+    switch_tab(b, index);
+    return index;
+}
+
+void close_tab(Browser& b, int index) {
+    if (index < 0 || index >= static_cast<int>(b.tabs.size())) return;
+    WinTab& tab = *b.tabs[static_cast<size_t>(index)];
+
+    if (tab.content) WKRelease(tab.content);
+    if (tab.preferences) WKRelease(tab.preferences);
+    if (tab.owns_store && tab.store) WKRelease(tab.store);
+    if (tab.view) WKRelease(tab.view);
+
+    b.tabs.erase(b.tabs.begin() + index);
+    SendMessageW(b.tab_ctrl, TCM_DELETEITEM, static_cast<WPARAM>(index), 0);
+
+    if (b.tabs.empty()) {
+        DestroyWindow(b.window);
+        return;
+    }
+    if (b.active == index) {
+        int next = index < static_cast<int>(b.tabs.size()) ? index : static_cast<int>(b.tabs.size()) - 1;
+        b.active = -1;
+        switch_tab(b, next);
+    } else if (b.active > index) {
+        b.active--;
+    }
+    refresh_chrome(b);
+}
+
+void fill_history_list(Browser& b) {
+    if (!b.history_list) return;
+    SendMessageW(b.history_list, LB_RESETCONTENT, 0, 0);
+    b.history_urls.clear();
+    for (const mustela::HistoryEntry& entry : b.history->recent(200)) {
+        b.history_urls.push_back(entry.url);
+        std::wstring line = to_wide(entry.title.empty() ? entry.url : entry.title + "  —  " + entry.url);
+        SendMessageW(b.history_list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+    }
+}
+
+void open_history_window(Browser& b) {
+    if (b.history_window) {
+        ShowWindow(b.history_window, SW_RESTORE);
+        SetForegroundWindow(b.history_window);
+        return;
+    }
+    b.history_window = CreateWindowExW(0, L"MUSTELA_HISTORY_WND", L"History — Mustela",
+        WS_OVERLAPPEDWINDOW | WS_CAPTION, CW_USEDEFAULT, CW_USEDEFAULT, 760, 520,
+        b.window, nullptr, GetModuleHandleW(nullptr), nullptr);
+    fill_history_list(b);
+    ShowWindow(b.history_window, SW_SHOW);
+    UpdateWindow(b.history_window);
+}
+
+LRESULT CALLBACK history_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (!browser) return DefWindowProcW(wnd, message, wparam, lparam);
+    Browser& b = *browser;
+    switch (message) {
+        case WM_CREATE: {
+            RECT client = {};
+            GetClientRect(wnd, &client);
+            b.history_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                12, 12, client.right - 24, client.bottom - 72, wnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_HISTORY_LIST)), GetModuleHandleW(nullptr), nullptr);
+            CreateWindowExW(0, WC_BUTTONW, L"Clear history", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                12, client.bottom - 48, 140, 32, wnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_HISTORY_CLEAR)), GetModuleHandleW(nullptr), nullptr);
+            return 0;
+        }
+        case WM_SIZE: {
+            if (b.history_list) {
+                MoveWindow(b.history_list, 12, 12, LOWORD(lparam) - 24, HIWORD(lparam) - 72, TRUE);
+                MoveWindow(GetDlgItem(wnd, ID_HISTORY_CLEAR), 12, HIWORD(lparam) - 48, 140, 32, TRUE);
+            }
+            return 0;
+        }
+        case WM_COMMAND: {
+            if (LOWORD(wparam) == ID_HISTORY_CLEAR) {
+                b.history->clear();
+                fill_history_list(b);
+                flash_status(b, "history cleared");
+            }
+            if (LOWORD(wparam) == ID_HISTORY_LIST && HIWORD(wparam) == LBN_DBLCLK) {
+                int selected = static_cast<int>(SendMessageW(b.history_list, LB_GETCURSEL, 0, 0));
+                if (selected >= 0 && selected < static_cast<int>(b.history_urls.size())) {
+                    std::string url = b.history_urls[static_cast<size_t>(selected)];
+                    open_tab(b, url, TabPrivacy::Normal);
+                }
+            }
+            return 0;
+        }
+        case WM_CLOSE:
+            DestroyWindow(wnd);
+            return 0;
+        case WM_DESTROY:
+            b.history_window = nullptr;
+            b.history_list = nullptr;
+            return 0;
+        default:
+            return DefWindowProcW(wnd, message, wparam, lparam);
+    }
+}
+
+DWORD WINAPI watcher_main(LPVOID) {
+    Browser& b = *browser;
+    HANDLE dir = CreateFileW(app_base_dir().c_str(), FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (dir == INVALID_HANDLE_VALUE) return 0;
+
+    alignas(FILE_NOTIFY_INFORMATION) char buffer[4096];
+    DWORD bytes = 0;
+    while (!b.watcher_stop) {
+        if (!ReadDirectoryChangesW(dir, buffer, sizeof(buffer), FALSE,
+                FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME, &bytes, nullptr, nullptr)) {
+            break;
+        }
+        if (b.watcher_stop) break;
+        FILE_NOTIFY_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer);
+        while (info) {
+            std::wstring name(info->FileName, info->FileNameLength / sizeof(WCHAR));
+            if (name == L"settings.toml" || name == L"sites.toml") {
+                PostMessageW(b.window, WM_APP_RELOAD_CHANGED, 0, 0);
+                break;
+            }
+            if (info->NextEntryOffset == 0) break;
+            info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(reinterpret_cast<char*>(info) + info->NextEntryOffset);
+        }
+    }
+    CancelIoEx(dir, nullptr);
+    CloseHandle(dir);
+    return 0;
+}
+
+void reload_settings_and_policies(Browser& b) {
+    b.settings = mustela::load_settings(config_path("settings.toml"));
+    b.privacy = mustela::privacy_from(b.settings);
+    if (b.sites) b.sites->load();
+
+    if (b.persistent_store) {
+        apply_cookie_policy(b.persistent_store, b.privacy.cookies);
+        apply_itp(b.persistent_store, b.privacy.hardening.tracking_prevention);
+    }
+    apply_policies_to_tabs(b);
+    SendMessageW(b.private_toggle, BM_SETCHECK,
+        b.privacy.default_private == TabPrivacy::Private ? BST_CHECKED : BST_UNCHECKED, 0);
+    refresh_chrome(b);
+    flash_status(b, "settings reloaded");
+}
+
+void layout_window(Browser& b, int width, int height) {
+    if (!b.back_btn || !b.forward_btn || !b.reload_btn || !b.close_tab_btn || !b.url_entry ||
+        !b.new_tab_btn || !b.private_toggle || !b.tab_ctrl || !b.status_bar) {
+        return;
+    }
+    int toolbar_y = 8;
+    int toolbar_h = 30;
+    MoveWindow(b.back_btn, 8, toolbar_y, 40, toolbar_h, TRUE);
+    MoveWindow(b.forward_btn, 52, toolbar_y, 40, toolbar_h, TRUE);
+    MoveWindow(b.reload_btn, 96, toolbar_y, 40, toolbar_h, TRUE);
+    MoveWindow(b.close_tab_btn, 140, toolbar_y, 28, toolbar_h, TRUE);
+    MoveWindow(b.url_entry, 176, toolbar_y, width - 292, toolbar_h, TRUE);
+    MoveWindow(b.new_tab_btn, width - 112, toolbar_y, 28, toolbar_h, TRUE);
+    MoveWindow(b.private_toggle, width - 80, toolbar_y, 72, toolbar_h, TRUE);
+
+    int tabs_y = toolbar_y + toolbar_h + 6;
+    int tabs_h = 28;
+    MoveWindow(b.tab_ctrl, 4, tabs_y, width - 8, tabs_h, TRUE);
+    SendMessageW(b.status_bar, WM_SIZE, 0, 0);
+
+    RECT status_rect = {};
+    GetWindowRect(b.status_bar, &status_rect);
+    int status_h = status_rect.bottom - status_rect.top;
+
+    RECT view_area = {4, tabs_y + tabs_h, width - 4, height - status_h};
+    SendMessageW(b.tab_ctrl, TCM_ADJUSTRECT, FALSE, reinterpret_cast<LPARAM>(&view_area));
+    WinTab* tab = active_tab(b);
+    if (tab) {
+        SetWindowPos(WKViewGetWindow(tab->view), HWND_TOP,
+            view_area.left, view_area.top,
+            view_area.right - view_area.left, view_area.bottom - view_area.top, SWP_NOACTIVATE);
+    }
+}
+
+LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (!browser) return DefWindowProcW(wnd, message, wparam, lparam);
+    Browser& b = *browser;
+    switch (message) {
+        case WM_SIZE:
+            layout_window(b, LOWORD(lparam), HIWORD(lparam));
+            return 0;
+        case WM_GETMINMAXINFO: {
+            MINMAXINFO* info = reinterpret_cast<MINMAXINFO*>(lparam);
+            info->ptMinTrackSize.x = 720;
+            info->ptMinTrackSize.y = 480;
+            return 0;
+        }
+        case WM_SETFOCUS: {
+            WinTab* tab = active_tab(b);
+            if (tab) SetFocus(WKViewGetWindow(tab->view));
+            else SetFocus(b.url_entry);
+            return 0;
+        }
+        case WM_TIMER:
+            if (wparam == TIMER_FLASH) {
+                KillTimer(wnd, TIMER_FLASH);
+                b.status_flash = false;
+                refresh_status(b);
+            }
+            if (wparam == TIMER_RELOAD) {
+                KillTimer(wnd, TIMER_RELOAD);
+                reload_settings_and_policies(b);
+            }
+            return 0;
+        case WM_APP_RELOAD_CHANGED:
+            SetTimer(wnd, TIMER_RELOAD, 300, nullptr);
+            return 0;
+        case WM_NOTIFY: {
+            NMHDR* header = reinterpret_cast<NMHDR*>(lparam);
+            if (header && header->idFrom == ID_TABS && header->code == TCN_SELCHANGE) {
+                int index = static_cast<int>(SendMessageW(b.tab_ctrl, TCM_GETCURSEL, 0, 0));
+                switch_tab(b, index);
+            }
+            return 0;
+        }
+        case WM_COMMAND: {
+            WORD id = LOWORD(wparam);
+            WORD code = HIWORD(wparam);
+            if (id == ID_URL && code == EN_RETURN) {
+                load_url_text(b, to_utf8(get_window_text(b.url_entry)));
+                SetFocus(b.url_entry);
+                return 0;
+            }
+            if (id == ID_PRIVATE && code == BN_CLICKED) {
+                bool checked = SendMessageW(b.private_toggle, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (checked && !b.privacy.private_tabs_available) {
+                    SendMessageW(b.private_toggle, BM_SETCHECK, BST_UNCHECKED, 0);
+                    flash_status(b, "private tabs disabled");
+                    return 0;
+                }
+                b.privacy.default_private = checked ? TabPrivacy::Private : TabPrivacy::Normal;
+                flash_status(b, checked ? "new tabs open private" : "new tabs open normal");
+                return 0;
+            }
+            switch (id) {
+                case ID_BACK: {
+                    WinTab* tab = active_tab(b);
+                    if (tab && tab->page && WKPageCanGoBack(tab->page)) WKPageGoBack(tab->page);
+                    return 0;
+                }
+                case ID_FORWARD: {
+                    WinTab* tab = active_tab(b);
+                    if (tab && tab->page && WKPageCanGoForward(tab->page)) WKPageGoForward(tab->page);
+                    return 0;
+                }
+                case ID_RELOAD:
+                case ID_ACC_RELOAD: {
+                    WinTab* tab = active_tab(b);
+                    if (tab && tab->page) WKPageReload(tab->page);
+                    return 0;
+                }
+                case ID_NEW_TAB:
+                case ID_ACC_NEW_TAB:
+                    open_tab(b, b.settings.homepage, b.privacy.default_private);
+                    return 0;
+                case ID_CLOSE_TAB:
+                case ID_ACC_CLOSE_TAB:
+                    close_tab(b, b.active);
+                    return 0;
+                case ID_CLEAR_DATA:
+                case ID_ACC_CLEAR_DATA:
+                    clear_browsing_data(b);
+                    flash_status(b, "browsing data cleared");
+                    return 0;
+                case ID_HISTORY:
+                case ID_ACC_HISTORY:
+                    open_history_window(b);
+                    return 0;
+                case ID_ACC_URL:
+                    SetFocus(b.url_entry);
+                    SendMessageW(b.url_entry, EM_SETSEL, 0, -1);
+                    return 0;
+                case ID_ACC_BACK:
+                    SendMessageW(wnd, WM_COMMAND, MAKEWPARAM(ID_BACK, 0), 0);
+                    return 0;
+                case ID_ACC_FORWARD:
+                    SendMessageW(wnd, WM_COMMAND, MAKEWPARAM(ID_FORWARD, 0), 0);
+                    return 0;
+                default:
+                    return 0;
+            }
+        }
+        case WM_DESTROY: {
+            b.watcher_stop = true;
+            if (b.watcher_thread) {
+                WaitForSingleObject(b.watcher_thread, 2000);
+                CloseHandle(b.watcher_thread);
+                b.watcher_thread = nullptr;
+            }
+            RECT client = {};
+            if (GetClientRect(wnd, &client) && client.right > 0) {
+                b.settings.window_width = client.right;
+                b.settings.window_height = client.bottom;
+                mustela::save_settings(config_path("settings.toml"), b.settings);
+            }
+            KillTimer(wnd, TIMER_FLASH);
+            KillTimer(wnd, TIMER_RELOAD);
+            PostQuitMessage(0);
+            return 0;
+        }
+        default:
+            return DefWindowProcW(wnd, message, wparam, lparam);
+    }
+}
+
+}
+
+int mustela_main(int argc, char** argv) {
+    INITCOMMONCONTROLSEX controls = {sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES};
+    InitCommonControlsEx(&controls);
+    OleInitialize(nullptr);
+
+    Settings settings = mustela::load_settings(config_path("settings.toml"));
+    PrivacyPolicy privacy = mustela::privacy_from(settings);
+
+    bool start_private = false;
+    std::string start_url;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--private") == 0) {
+            start_private = true;
+        } else {
+            start_url = argv[i];
+        }
+    }
+
+    Browser& b = *(browser = new Browser());
+    b.settings = settings;
+    b.privacy = privacy;
+    if (start_private && b.privacy.private_tabs_available) {
+        b.privacy.default_private = TabPrivacy::Private;
+    }
+    b.sites = std::make_unique<SiteRules>(config_path("sites.toml"));
+    b.sites->load();
+    b.history = std::make_unique<mustela::HistoryStore>(profile_path("history.tsv"));
+
+    WkHold context_configuration(WKContextConfigurationCreate());
+    b.context = WKContextCreateWithConfiguration(static_cast<WKContextConfigurationRef>(context_configuration.ref));
+
+    create_dir_chain(profile_dir_wide());
+    std::wstring profile = profile_dir_wide();
+    create_dir_chain(profile + L"\\filters");
+    WkHold store_configuration(WKWebsiteDataStoreConfigurationCreate());
+    WKWebsiteDataStoreConfigurationRef store_config = static_cast<WKWebsiteDataStoreConfigurationRef>(store_configuration.ref);
+    std::vector<std::unique_ptr<WkHold>> store_strings;
+    auto store_dir = [&](const wchar_t* name) {
+        store_strings.push_back(std::make_unique<WkHold>(make_wkstring(to_utf8(profile + L"\\" + name))));
+        return static_cast<WKStringRef>(store_strings.back()->ref);
+    };
+    WKWebsiteDataStoreConfigurationSetNetworkCacheDirectory(store_config, store_dir(L"cache"));
+    WKWebsiteDataStoreConfigurationSetCacheStorageDirectory(store_config, store_dir(L"cachestorage"));
+    WKWebsiteDataStoreConfigurationSetLocalStorageDirectory(store_config, store_dir(L"storage"));
+    WKWebsiteDataStoreConfigurationSetGeneralStorageDirectory(store_config, store_dir(L"storage"));
+    WKWebsiteDataStoreConfigurationSetWebSQLDatabaseDirectory(store_config, store_dir(L"websql"));
+    WKWebsiteDataStoreConfigurationSetIndexedDBDatabaseDirectory(store_config, store_dir(L"idb"));
+    WKWebsiteDataStoreConfigurationSetMediaKeysStorageDirectory(store_config, store_dir(L"mediakeys"));
+    WKWebsiteDataStoreConfigurationSetResourceLoadStatisticsDirectory(store_config, store_dir(L"stats"));
+    WKWebsiteDataStoreConfigurationSetServiceWorkerRegistrationDirectory(store_config, store_dir(L"sw"));
+    WKWebsiteDataStoreConfigurationSetIsolatedSitesDirectory(store_config, store_dir(L"isolated"));
+    WKWebsiteDataStoreConfigurationSetCookieStorageFile(store_config, store_dir(L"cookies.txt"));
+    b.persistent_store = WKWebsiteDataStoreCreateWithConfiguration(store_config);
+    apply_cookie_policy(b.persistent_store, b.privacy.cookies);
+    apply_itp(b.persistent_store, b.privacy.hardening.tracking_prevention);
+
+    WkHold filter_path(make_wkstring(profile_path("filters")));
+    b.filter_store = WKUserContentExtensionStoreCreate(static_cast<WKStringRef>(filter_path.ref));
+    compile_fonts_filter(b);
+
+    WNDCLASSW main_class = {};
+    main_class.lpfnWndProc = main_proc;
+    main_class.hInstance = GetModuleHandleW(nullptr);
+    main_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    main_class.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    main_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    main_class.lpszClassName = L"MUSTELA_MAIN_WND";
+    RegisterClassW(&main_class);
+
+    WNDCLASSW history_class = main_class;
+    history_class.lpfnWndProc = history_proc;
+    history_class.lpszClassName = L"MUSTELA_HISTORY_WND";
+    RegisterClassW(&history_class);
+
+    int width = b.settings.window_width;
+    int height = b.settings.window_height;
+    HWND window = CreateWindowExW(0, L"MUSTELA_MAIN_WND", L"Mustela", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, width, height, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    b.window = window;
+
+    b.back_btn = CreateWindowExW(0, WC_BUTTONW, L"←", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        8, 8, 40, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_BACK)), GetModuleHandleW(nullptr), nullptr);
+    b.forward_btn = CreateWindowExW(0, WC_BUTTONW, L"→", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        52, 8, 40, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_FORWARD)), GetModuleHandleW(nullptr), nullptr);
+    b.reload_btn = CreateWindowExW(0, WC_BUTTONW, L"⟳", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        96, 8, 40, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_RELOAD)), GetModuleHandleW(nullptr), nullptr);
+    b.close_tab_btn = CreateWindowExW(0, WC_BUTTONW, L"×", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        140, 8, 28, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CLOSE_TAB)), GetModuleHandleW(nullptr), nullptr);
+    b.url_entry = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+        176, 8, width - 292, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_URL)), GetModuleHandleW(nullptr), nullptr);
+    b.new_tab_btn = CreateWindowExW(0, WC_BUTTONW, L"+", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        width - 112, 8, 28, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NEW_TAB)), GetModuleHandleW(nullptr), nullptr);
+    b.private_toggle = CreateWindowExW(0, WC_BUTTONW, L"Private", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        width - 80, 8, 72, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_PRIVATE)), GetModuleHandleW(nullptr), nullptr);
+    b.tab_ctrl = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        4, 44, width - 8, 28, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TABS)), GetModuleHandleW(nullptr), nullptr);
+    b.status_bar = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
+        0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_STATUS)), GetModuleHandleW(nullptr), nullptr);
+
+    SendMessageW(b.url_entry, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search or enter address"));
+    if (b.privacy.default_private == TabPrivacy::Private) {
+        SendMessageW(b.private_toggle, BM_SETCHECK, BST_CHECKED, 0);
+    }
+
+    ACCEL accelerators[] = {
+        {FVIRTKEY | FCONTROL, 'L', ID_ACC_URL},
+        {FVIRTKEY | FCONTROL, 'T', ID_ACC_NEW_TAB},
+        {FVIRTKEY | FCONTROL, 'W', ID_ACC_CLOSE_TAB},
+        {FVIRTKEY | FCONTROL, 'R', ID_ACC_RELOAD},
+        {FVIRTKEY, VK_F5, ID_ACC_RELOAD},
+        {FVIRTKEY | FCONTROL | FSHIFT, VK_DELETE, ID_ACC_CLEAR_DATA},
+        {FVIRTKEY | FCONTROL, 'H', ID_ACC_HISTORY},
+        {FVIRTKEY | FALT, VK_LEFT, ID_ACC_BACK},
+        {FVIRTKEY | FALT, VK_RIGHT, ID_ACC_FORWARD}
+    };
+    HACCEL accel = CreateAcceleratorTableW(accelerators, 9);
+
+    b.watcher_thread = CreateThread(nullptr, 0, watcher_main, nullptr, 0, nullptr);
+
+    TabPrivacy first_request = start_private ? TabPrivacy::Private : b.privacy.default_private;
+    open_tab(b, start_url.empty() ? b.settings.homepage : start_url, first_request);
+
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+
+    MSG message = {};
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (!TranslateAcceleratorW(window, accel, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+
+    DestroyAcceleratorTable(accel);
+    for (std::unique_ptr<WinTab>& tab : b.tabs) {
+        if (tab->content) WKRelease(tab->content);
+        if (tab->preferences) WKRelease(tab->preferences);
+        if (tab->owns_store && tab->store) WKRelease(tab->store);
+        if (tab->view) WKRelease(tab->view);
+    }
+    b.tabs.clear();
+
+    if (b.filter_store) WKRelease(b.filter_store);
+    if (b.fonts_filter) WKRelease(b.fonts_filter);
+    if (b.persistent_store) WKRelease(b.persistent_store);
+    if (b.context) WKRelease(b.context);
+
+    delete &b;
+    browser = nullptr;
+
+    OleUninitialize();
+    return 0;
 }
