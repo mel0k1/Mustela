@@ -16,7 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config libwebkit2gtk-4.1-dev
+          sudo apt-get install -y cmake ninja-build pkg-config libwebkit2gtk-4.1-dev xvfb
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -26,6 +26,9 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Page-load bench
+        run: xvfb-run -a env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 ./build/mustela-bench --url "file://${{ github.workspace }}/tests/fixtures/bench.html" --runs 5 --max-ms 10000
 
   windows-core:
     name: windows core tests
@@ -55,4 +58,4 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Compile shell against upstream headers
-        run: cl /nologo /c /W4 /std:c++17 /EHsc /Ibuild\sdk\include /Isrc /Isrc\core /Fobuild\shell_win.obj src\shell\win\shell_win.cpp
+        run: cl /nologo /c /W4 /std:c++20 /EHsc /Ibuild\sdk\include /Isrc /Isrc\core /Fobuild\shell_win.obj src\shell\win\shell_win.cpp

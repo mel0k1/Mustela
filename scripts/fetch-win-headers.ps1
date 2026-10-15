@@ -19,7 +19,11 @@ $paths = @(
     "Source/WebKit/UIProcess/API/C",
     "Source/WebKit/UIProcess/API/C/win",
     "Source/WebKit/Shared/API/c",
-    "Source/WebKit/Shared/API/c/win"
+    "Source/WebKit/Shared/API/c/win",
+    "Source/WebKit/Shared/API/c/gtk",
+    "Source/WebKit/Shared/API/c/mac",
+    "Source/WebKit/Shared/API/c/wpe",
+    "Source/WebKit/Shared/API/c/playstation"
 )
 
 $base = "https://raw.githubusercontent.com/$Repo/$Commit"
