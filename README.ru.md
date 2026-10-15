@@ -3,7 +3,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-17-00599C)
-![status](https://img.shields.io/badge/status-M1.5_engine_APIs-e0a03d)
+![status](https://img.shields.io/badge/status-M2_privacy_core-e0a03d)
 
 Приватный кроссплатформенный браузерный движок на базе WebKit.
 
@@ -19,7 +19,7 @@ English version: [README.md](README.md)
 
 ## Статус
 
-`v0.3.0` — движковые API для будущего браузера. История живёт в ядре и никогда не записывает приватные табы, политика приватности поддерживает переключение на лету, а оболочка демонстрирует это тумблером Private и окном истории (Ctrl+H).
+`v0.4.0` — ядро приватности: политика куки (`always` / `no-third-party` / `never`), Intelligent Tracking Prevention, hardening-переключатели (JavaScript, hyperlink auditing, DNS prefetching, autoplay) и очистка browsing-data одной клавишей (Ctrl+Shift+Del). Тулбар показывает активную политику с первого взгляда.
 
 Куда всё движется — в [дорожной карте](docs/ROADMAP.md).
 
@@ -46,7 +46,7 @@ sudo apt install build-essential cmake pkg-config libwebkit2gtk-4.1-dev
 ## Структура
 
 ```
-src/core/        настройки и политика приватности (переносимое ядро без UI-зависимостей)
+src/core/        настройки, политика приватности, модели browsing-data (переносимое ядро без UI-зависимостей)
 src/shell/       оболочка-эмбеддер, по каталогу на порт
 src/shell/gtk/   порт Linux (WebKitGTK)
 src/shell/win/   порт Windows (WinCairo, в работе)

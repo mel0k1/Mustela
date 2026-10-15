@@ -44,6 +44,12 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | privacy.private_tabs_enabled | true | allow private tabs at all |
 | privacy.start_in_private | false | open new tabs in private mode by default |
 | privacy.history_enabled | true | record visited pages in history |
+| privacy.cookie_policy | no-third-party | `always`, `no-third-party` or `never` |
+| privacy.tracking_prevention | true | Intelligent Tracking Prevention on the persistent profile |
+| privacy.javascript | true | engine-level JavaScript switch |
+| privacy.hyperlink_auditing | false | allow `<a ping>` link auditing |
+| privacy.dns_prefetching | false | speculative DNS lookups |
+| privacy.block_autoplay | true | media playback requires a user gesture |
 
 Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead.
 
@@ -56,6 +62,7 @@ Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profi
 | Ctrl+W | close tab |
 | Ctrl+L | focus the address bar |
 | Ctrl+H | history window |
+| Ctrl+Shift+Del | clear browsing data (cookies, cache, storage, IndexedDB) |
 | Ctrl+R / F5 | reload |
 | Alt+Left / Alt+Right | back / forward |
 | Escape | stop loading |

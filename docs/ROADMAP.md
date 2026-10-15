@@ -16,18 +16,21 @@ Milestones are capability-based; dates are intentionally not assigned.
 - Mustela-owned profile directory, separate from system defaults. (done)
 - Settings file (TOML) loaded at startup, saved on exit. (done)
 
-## M1.5 — Engine APIs and shell demos (current)
+## M1.5 — Engine APIs and shell demos (done)
 
 - History store in the core, private tabs excluded at the policy level. (done)
 - Runtime privacy toggle in the shell UI. (done)
 - History window in the shell (Ctrl+H) with clear action. (done)
+- Settings hot-reload on file change. (moved to M2)
+
+## M2 — Privacy core (current)
+
+- Cookie accept policy per context: `always`, `no-third-party`, `never`. (done)
+- Intelligent Tracking Prevention on the persistent profile. (done)
+- Hardening switches: JavaScript, hyperlink auditing, DNS prefetching, autoplay gesture. (done)
+- Browsing-data kinds (`DataKind`, `ClearRequest`) and a clear action in the shell (Ctrl+Shift+Del). (done)
 - Settings hot-reload on file change. (next)
-
-## M2 — Privacy core
-
-- Per-profile cookie and storage policies.
-- Switches: JavaScript, WebGL, canvas, autoplay, remote fonts, referrer policy.
-- First-party-only mode and third-party storage blocking.
+- More fingerprint switches: WebGL, canvas, remote fonts, referrer trimming.
 - Per-site overrides on top of the global policy.
 
 ## M3 — Windows port

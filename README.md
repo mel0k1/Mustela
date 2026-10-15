@@ -3,7 +3,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-17-00599C)
-![status](https://img.shields.io/badge/status-M1.5_engine_APIs-e0a03d)
+![status](https://img.shields.io/badge/status-M2_privacy_core-e0a03d)
 
 Privacy-first, cross-platform browser engine built on WebKit.
 
@@ -19,7 +19,7 @@ Existing engines force a trade-off between privacy, platform coverage and speed.
 
 ## Status
 
-`v0.3.0` — engine APIs for the browser product. History lives in the core and never records private tabs, the privacy policy supports a runtime toggle, and the shell demonstrates both with a Private switch and a history window (Ctrl+H).
+`v0.4.0` — the privacy core: cookie accept policy (`always` / `no-third-party` / `never`), Intelligent Tracking Prevention, hardening switches (JavaScript, hyperlink auditing, DNS prefetching, autoplay) and one-key browsing-data clearing (Ctrl+Shift+Del). The toolbar shows the active policy at a glance.
 
 See the [roadmap](docs/ROADMAP.md) for where this goes.
 
@@ -46,7 +46,7 @@ Full guide, including Windows: [docs/BUILDING.md](docs/BUILDING.md).
 ## Layout
 
 ```
-src/core/        settings and privacy policy (portable, no UI deps)
+src/core/        settings, privacy policy, browsing-data kinds (portable, no UI deps)
 src/shell/       embedder shell, one directory per port
 src/shell/gtk/   Linux port (WebKitGTK)
 src/shell/win/   Windows port (WinCairo, in progress)

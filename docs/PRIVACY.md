@@ -10,16 +10,52 @@ Privacy in Mustela is a configuration surface, not a slogan. The long-term rule:
 4. **Fingerprint surface is a budget.** Settings that reduce uniqueness — fonts, WebGL, canvas, timezone exposure — are documented, combinable and measurable.
 5. **User data is local.** Profiles, history and settings live on disk in open formats. No cloud sync unless the user builds it themselves.
 
-## Current state (v0.3)
+## Current state (v0.4)
 
 - Default mode is normal browsing: privacy is off unless asked for.
 - The default profile is Mustela-owned and persistent under `~/.local/share/mustela/profiles/default`, never in WebKit's system location.
 - Private tabs are opt-in: `Ctrl+Shift+P` opens one, `--private` on the command line makes the first tab private. Private tabs run in a shared ephemeral WebKit context — cookies, cache and storage stay in memory and die with the process.
-- The policy lives in `~/.config/mustela/settings.toml`: `privacy.private_tabs_enabled` gates private tabs entirely, `privacy.start_in_private` flips the default. Both are read through `PrivacyPolicy` in the core; the shell only asks the policy.
+- The policy lives in `~/.config/mustela/settings.toml` and is read through `PrivacyPolicy` in the core; the shell only asks the policy, never decides on its own.
+
+### Cookies
+
+The cookie accept policy is a single setting applied to every context, normal and ephemeral alike:
+
+| `privacy.cookie_policy` | Behavior |
+|--------------------------|----------|
+| `always` | accept all cookies, first-party and third-party |
+| `no-third-party` | accept first-party, reject third-party (default) |
+| `never` | accept nothing; sessions do not survive a reload |
+
+### Tracking prevention
+
+`privacy.tracking_prevention = true` (default) enables WebKit's Intelligent Tracking Prevention on the persistent profile before any context uses it.
+
+### Hardening switches
+
+Applied to every web view at creation time:
+
+| Setting | Default | WebKit surface |
+|---------|---------|----------------|
+| `privacy.javascript` | true | `enable-javascript` |
+| `privacy.hyperlink_auditing` | false | `enable-hyperlink-auditing` — `<a ping>` traffic stays off |
+| `privacy.dns_prefetching` | false | `enable-dns-prefetching` — no speculative DNS traffic |
+| `privacy.block_autoplay` | true | `media-playback-requires-user-gesture` |
+
+### Clearing browsing data
+
+`Ctrl+Shift+Del` clears cookies, memory and disk cache, local/session storage and IndexedDB for both contexts at once. The kinds live in the core as `DataKind` flags and `ClearRequest`, so a future UI can offer granular clear with a time range.
+
+### History
+
+History is stored by the core (`HistoryStore`) inside the default profile. Private tabs never reach it — `PrivacyPolicy::records_history` returns false for them — and `privacy.history_enabled = false` turns recording off entirely.
+
+### What stays constant
+
 - The shell toolbar has a Private toggle that switches the default for new tabs at runtime; it is session-scoped and never persisted.
-- History is stored by the core (`HistoryStore`) inside the default profile. Private tabs never reach it — `PrivacyPolicy::records_history` returns false for them — and `privacy.history_enabled = false` turns recording off entirely.
+- The status label in the toolbar shows the active policy: current tab mode, cookie policy and ITP state.
 - No telemetry exists anywhere in the codebase, and this bullet is enforced by review.
 
 ## Next steps
 
-See stage M2 of the [roadmap](ROADMAP.md): per-profile policies, first-party-only mode and the first set of storage switches.
+Per-site overrides on top of the global policy (allowlist of domains allowed to set cookies and storage), more fingerprint-surface switches (WebGL, canvas, remote fonts, referrer trimming) — see stage M2 of the [roadmap](ROADMAP.md).
