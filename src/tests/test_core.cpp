@@ -28,6 +28,7 @@
 #include "perf.hpp"
 #include "permissions.hpp"
 #include "privacy.hpp"
+#include "psl.hpp"
 #include "proxy_server.hpp"
 #include "session.hpp"
 #include "site_rules.hpp"
@@ -198,6 +199,143 @@ void test_settings_partial_file() {
     CHECK(loaded.cookie_policy == "always");
     CHECK(!loaded.javascript_enabled);
     CHECK(loaded.tracking_prevention);
+}
+
+void test_settings_load_report() {
+    std::string path = write_temp("report.toml",
+        "version = 2\n"
+        "[shell]\n"
+        "homepage = \"https://report.example\"\n"
+        "window_height = not-a-number\n"
+        "zoom = 5.0\n"
+        "homeslice = \"oops\"\n"
+        "[proxy]\n"
+        "mode = \"bogus\"\n"
+        "[permissions]\n"
+        "camera = \"maybe\"\n");
+    mustela::SettingsReport report;
+    mustela::Settings loaded = mustela::load_settings(path, report);
+    CHECK(report.file_found);
+    CHECK(report.version == 2);
+    CHECK(report.warnings.size() == 1);
+    CHECK(report.warnings[0].find("newer than supported") != std::string::npos);
+    CHECK(report.unknown_keys.size() == 1);
+    CHECK_STR(report.unknown_keys[0], "shell.homeslice");
+    CHECK(report.invalid_values.size() == 3);
+    CHECK(report.applied == 2);
+    CHECK(report.summary().find("unknown=1") != std::string::npos);
+    CHECK(report.summary().find("invalid=3") != std::string::npos);
+    CHECK_STR(loaded.homepage, "https://report.example");
+    CHECK(loaded.window_height == 800);
+    CHECK(loaded.zoom_default == 3.0);
+    CHECK_STR(loaded.proxy_mode, "off");
+    CHECK_STR(loaded.permissions_camera, "deny");
+
+    std::string clean = write_temp("clean_settings.toml",
+        "version = 1\n[shell]\nhomepage = \"https://clean.example\"\n");
+    mustela::SettingsReport ok;
+    mustela::Settings clean_settings = mustela::load_settings(clean, ok);
+    CHECK(ok.version == 1);
+    CHECK(ok.applied == 1);
+    CHECK(ok.warnings.empty());
+    CHECK(ok.unknown_keys.empty());
+    CHECK(ok.invalid_values.empty());
+    CHECK_STR(clean_settings.homepage, "https://clean.example");
+
+    mustela::SettingsReport missing;
+    mustela::Settings defaults = mustela::load_settings(temp_path("missing_settings.toml"), missing);
+    CHECK(!missing.file_found);
+    CHECK(missing.version == 0);
+    CHECK(missing.applied == 0);
+    CHECK(missing.unknown_keys.empty());
+    CHECK(missing.invalid_values.empty());
+    CHECK(missing.warnings.empty());
+    CHECK_STR(defaults.homepage, "https://example.org");
+
+    std::string saved_path = temp_path("saved_report.toml");
+    mustela::Settings original;
+    mustela::save_settings(saved_path, original);
+    mustela::SettingsReport roundtrip;
+    mustela::load_settings(saved_path, roundtrip);
+    CHECK(roundtrip.version == mustela::kSettingsVersion);
+    CHECK(roundtrip.applied > 30);
+    CHECK(roundtrip.unknown_keys.empty());
+    CHECK(roundtrip.invalid_values.empty());
+    CHECK(roundtrip.warnings.empty());
+}
+
+void test_psl() {
+    CHECK(mustela::is_public_suffix("com"));
+    CHECK(mustela::is_public_suffix("COM"));
+    CHECK(mustela::is_public_suffix("uk"));
+    CHECK(mustela::is_public_suffix("co.uk"));
+    CHECK(mustela::is_public_suffix("com.au"));
+    CHECK(mustela::is_public_suffix("example"));
+    CHECK(!mustela::is_public_suffix("example.com"));
+    CHECK(!mustela::is_public_suffix("foo.co.uk"));
+    CHECK(!mustela::is_public_suffix("deep.www.example.com"));
+    CHECK(!mustela::is_public_suffix(""));
+    CHECK(!mustela::is_public_suffix("localhost"));
+    CHECK(!mustela::is_public_suffix("www.localhost"));
+    CHECK(!mustela::is_public_suffix("192.168.1.1"));
+    CHECK(!mustela::is_public_suffix("2001:db8::1"));
+    CHECK(mustela::is_public_suffix("foo.ck"));
+    CHECK(!mustela::is_public_suffix("www.ck"));
+    CHECK(!mustela::is_public_suffix("a.www.ck"));
+    CHECK(mustela::is_public_suffix("foo.kobe.jp"));
+    CHECK(!mustela::is_public_suffix("a.foo.kobe.jp"));
+    CHECK(mustela::is_public_suffix("city.kobe.jp"));
+    CHECK(!mustela::is_public_suffix("www.city.kobe.jp"));
+    CHECK_STR(mustela::registrable_domain("deep.www.example.com"), "example.com");
+    CHECK_STR(mustela::registrable_domain("foo.co.uk"), "foo.co.uk");
+    CHECK_STR(mustela::registrable_domain("co.uk"), "");
+    CHECK_STR(mustela::registrable_domain("uk"), "");
+    CHECK_STR(mustela::registrable_domain("example.com."), "example.com");
+    CHECK_STR(mustela::registrable_domain("WWW.Example.COM"), "example.com");
+    CHECK_STR(mustela::registrable_domain("a.example"), "a.example");
+    CHECK_STR(mustela::registrable_domain("localhost"), "localhost");
+    CHECK_STR(mustela::registrable_domain("192.168.1.1"), "192.168.1.1");
+    CHECK_STR(mustela::registrable_domain("www.ck"), "www.ck");
+    CHECK_STR(mustela::registrable_domain("a.www.ck"), "www.ck");
+    CHECK_STR(mustela::registrable_domain("foo.ck"), "");
+    CHECK_STR(mustela::registrable_domain("ward.city.kobe.jp"), "ward.city.kobe.jp");
+    CHECK_STR(mustela::registrable_domain("a.foo.kobe.jp"), "a.foo.kobe.jp");
+    CHECK_STR(mustela::registrable_domain("foo.kobe.jp"), "");
+    CHECK_STR(mustela::registrable_domain(""), "");
+}
+
+void test_site_rules_psl_guard() {
+    std::string path = write_temp("sites_psl.toml",
+        "[co.uk]\n"
+        "javascript = \"deny\"\n"
+        "[com]\n"
+        "javascript = \"deny\"\n"
+        "[foo.co.uk]\n"
+        "cookies = \"allow\"\n");
+    mustela::SiteRules rules(path);
+    rules.load();
+    CHECK(rules.policy_for("shop.example.co.uk").javascript == mustela::SiteRule::Default);
+    CHECK(rules.policy_for("shop.example.co.uk").cookies == mustela::SiteRule::Default);
+    CHECK(rules.policy_for("foo.co.uk").cookies == mustela::SiteRule::Allow);
+    CHECK(rules.policy_for("anything.com").javascript == mustela::SiteRule::Default);
+
+    mustela::SitePolicy denied;
+    denied.javascript = mustela::SiteRule::Deny;
+    rules.set("co.uk", denied);
+    rules.set("org.uk", denied);
+    CHECK(rules.policy_for("bar.co.uk").javascript == mustela::SiteRule::Default);
+    CHECK(rules.entries().size() == 1);
+    rules.set("example.org", denied);
+    CHECK(rules.entries().size() == 2);
+    CHECK(rules.policy_for("www.example.org").javascript == mustela::SiteRule::Deny);
+    rules.save();
+
+    mustela::SiteRules reloaded(path);
+    reloaded.load();
+    CHECK(reloaded.entries().size() == 2);
+    CHECK(reloaded.policy_for("sub.foo.co.uk").cookies == mustela::SiteRule::Allow);
+    CHECK(reloaded.policy_for("sub.foo.co.uk").javascript == mustela::SiteRule::Default);
+    CHECK(reloaded.policy_for("deep.example.org").javascript == mustela::SiteRule::Deny);
 }
 
 void test_privacy_mapping() {
@@ -1255,9 +1393,12 @@ void test_proxy_server_loopback() {
 int main() {
     test_settings_roundtrip();
     test_settings_partial_file();
+    test_settings_load_report();
     test_privacy_mapping();
     test_host_from_uri();
+    test_psl();
     test_site_rules_matching();
+    test_site_rules_psl_guard();
     test_resolve_site();
     test_history_store();
     test_fingerprint_policy();

@@ -1,8 +1,22 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace mustela {
+
+constexpr int kSettingsVersion = 1;
+
+struct SettingsReport {
+    int version = 0;
+    int applied = 0;
+    bool file_found = false;
+    std::vector<std::string> unknown_keys;
+    std::vector<std::string> invalid_values;
+    std::vector<std::string> warnings;
+
+    std::string summary() const;
+};
 
 struct Settings {
     std::string homepage = "https://example.org";
@@ -46,6 +60,7 @@ struct Settings {
 };
 
 Settings load_settings(const std::string& path);
+Settings load_settings(const std::string& path, SettingsReport& report);
 void save_settings(const std::string& path, const Settings& settings);
 
 }

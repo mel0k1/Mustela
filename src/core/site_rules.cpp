@@ -1,5 +1,7 @@
 #include "site_rules.hpp"
 
+#include "psl.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -73,6 +75,7 @@ void SiteRules::load() {
 
         if (text.front() == '[' && text.back() == ']') {
             host = to_lower(trim(text.substr(1, text.size() - 2)));
+            if (is_public_suffix(host)) host.clear();
             continue;
         }
 
@@ -132,7 +135,9 @@ SitePolicy SiteRules::policy_for(const std::string& host) const {
     if (exact != rules_.end()) return exact->second;
 
     for (size_t dot = key.find('.'); dot != std::string::npos; dot = key.find('.', dot + 1)) {
-        auto it = rules_.find(key.substr(dot + 1));
+        std::string parent = key.substr(dot + 1);
+        if (is_public_suffix(parent)) break;
+        auto it = rules_.find(parent);
         if (it != rules_.end()) return it->second;
     }
     return SitePolicy{};
@@ -140,7 +145,7 @@ SitePolicy SiteRules::policy_for(const std::string& host) const {
 
 void SiteRules::set(const std::string& host, const SitePolicy& policy) {
     std::string key = to_lower(trim(host));
-    if (key.empty()) return;
+    if (key.empty() || is_public_suffix(key)) return;
     if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
         && policy.fingerprint == SiteRule::Default && policy.permissions == SiteRule::Default) {
         rules_.erase(key);

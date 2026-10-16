@@ -15,29 +15,44 @@ std::string trim(const std::string& s) {
     return s.substr(begin, end - begin + 1);
 }
 
-bool to_bool(const std::string& value, bool fallback) {
-    if (value == "true" || value == "1" || value == "yes" || value == "on") return true;
-    if (value == "false" || value == "0" || value == "no" || value == "off") return false;
-    return fallback;
+bool parse_bool(const std::string& value, bool& out) {
+    if (value == "true" || value == "1" || value == "yes" || value == "on") {
+        out = true;
+        return true;
+    }
+    if (value == "false" || value == "0" || value == "no" || value == "off") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+bool parse_int(const std::string& value, int& out) {
+    char* end = nullptr;
+    long parsed = std::strtol(value.c_str(), &end, 10);
+    if (end == value.c_str()) return false;
+    out = static_cast<int>(parsed);
+    return true;
+}
+
+bool parse_double(const std::string& value, double& out) {
+    char* end = nullptr;
+    double parsed = std::strtod(value.c_str(), &end);
+    if (end == value.c_str()) return false;
+    out = parsed;
+    return true;
 }
 
 int to_int(const std::string& value, int fallback) {
-    char* end = nullptr;
-    long parsed = std::strtol(value.c_str(), &end, 10);
-    if (end == value.c_str()) return fallback;
-    return static_cast<int>(parsed);
+    int out = fallback;
+    parse_int(value, out);
+    return out;
 }
 
-double to_double(const std::string& value, double fallback) {
-    char* end = nullptr;
-    double parsed = std::strtod(value.c_str(), &end);
-    if (end == value.c_str()) return fallback;
-    return parsed;
-}
-
-std::map<std::string, std::string> parse_toml_subset(const std::string& path) {
+std::map<std::string, std::string> parse_toml_subset(const std::string& path, SettingsReport* report) {
     std::map<std::string, std::string> pairs;
     std::ifstream in(path);
+    if (report) report->file_found = static_cast<bool>(in);
     if (!in) return pairs;
 
     std::string line;
@@ -73,24 +88,59 @@ std::map<std::string, std::string> parse_toml_subset(const std::string& path) {
     return pairs;
 }
 
-void apply(const std::map<std::string, std::string>& pairs, const std::string& key, std::string& target) {
+void apply(std::map<std::string, std::string>& pairs, const std::string& key, std::string& target,
+    SettingsReport* report) {
     auto it = pairs.find(key);
-    if (it != pairs.end() && !it->second.empty()) target = it->second;
+    if (it == pairs.end()) return;
+    std::string value = it->second;
+    pairs.erase(it);
+    if (report) ++report->applied;
+    if (!value.empty()) target = value;
 }
 
-void apply(const std::map<std::string, std::string>& pairs, const std::string& key, int& target) {
+void apply(std::map<std::string, std::string>& pairs, const std::string& key, int& target,
+    SettingsReport* report) {
     auto it = pairs.find(key);
-    if (it != pairs.end()) target = to_int(it->second, target);
+    if (it == pairs.end()) return;
+    int parsed = 0;
+    if (!parse_int(it->second, parsed)) {
+        pairs.erase(it);
+        if (report) report->invalid_values.push_back(key);
+        return;
+    }
+    pairs.erase(it);
+    target = parsed;
+    if (report) ++report->applied;
 }
 
-void apply(const std::map<std::string, std::string>& pairs, const std::string& key, bool& target) {
+void apply(std::map<std::string, std::string>& pairs, const std::string& key, bool& target,
+    SettingsReport* report) {
     auto it = pairs.find(key);
-    if (it != pairs.end()) target = to_bool(it->second, target);
+    if (it == pairs.end()) return;
+    bool parsed = false;
+    if (!parse_bool(it->second, parsed)) {
+        pairs.erase(it);
+        if (report) report->invalid_values.push_back(key);
+        return;
+    }
+    pairs.erase(it);
+    target = parsed;
+    if (report) ++report->applied;
 }
 
-void apply(const std::map<std::string, std::string>& pairs, const std::string& key, double& target) {
+void apply(std::map<std::string, std::string>& pairs, const std::string& key, double& target,
+    SettingsReport* report) {
     auto it = pairs.find(key);
-    if (it != pairs.end()) target = to_double(it->second, target);
+    if (it == pairs.end()) return;
+    double parsed = 0;
+    if (!parse_double(it->second, parsed)) {
+        pairs.erase(it);
+        if (report) report->invalid_values.push_back(key);
+        return;
+    }
+    pairs.erase(it);
+    target = parsed;
+    if (report) ++report->applied;
 }
 
 double clamp_zoom(double zoom) {
@@ -99,79 +149,126 @@ double clamp_zoom(double zoom) {
     return zoom;
 }
 
-std::string permission_value(const std::map<std::string, std::string>& pairs, const std::string& key,
-    const std::string& fallback) {
+std::string permission_value(std::map<std::string, std::string>& pairs, const std::string& key,
+    const std::string& fallback, SettingsReport* report) {
     auto it = pairs.find(key);
     if (it == pairs.end()) return fallback;
-    const std::string& value = it->second;
-    if (value == "deny" || value == "ask" || value == "allow") return value;
+    std::string value = it->second;
+    pairs.erase(it);
+    if (value == "deny" || value == "ask" || value == "allow") {
+        if (report) ++report->applied;
+        return value;
+    }
+    if (report) report->invalid_values.push_back(key);
     return fallback;
 }
 
-std::string proxy_mode_value(const std::map<std::string, std::string>& pairs, const std::string& key,
-    const std::string& fallback) {
+std::string proxy_mode_value(std::map<std::string, std::string>& pairs, const std::string& key,
+    const std::string& fallback, SettingsReport* report) {
     auto it = pairs.find(key);
     if (it == pairs.end()) return fallback;
-    const std::string& value = it->second;
-    if (value == "off" || value == "local" || value == "upstream") return value;
+    std::string value = it->second;
+    pairs.erase(it);
+    if (value == "off" || value == "local" || value == "upstream") {
+        if (report) ++report->applied;
+        return value;
+    }
+    if (report) report->invalid_values.push_back(key);
     return fallback;
 }
 
-std::string downloads_mode_value(const std::map<std::string, std::string>& pairs, const std::string& key,
-    const std::string& fallback) {
+std::string downloads_mode_value(std::map<std::string, std::string>& pairs, const std::string& key,
+    const std::string& fallback, SettingsReport* report) {
     auto it = pairs.find(key);
     if (it == pairs.end()) return fallback;
-    const std::string& value = it->second;
-    if (value == "auto" || value == "ask") return value;
+    std::string value = it->second;
+    pairs.erase(it);
+    if (value == "auto" || value == "ask") {
+        if (report) ++report->applied;
+        return value;
+    }
+    if (report) report->invalid_values.push_back(key);
     return fallback;
 }
 
+}
+
+std::string SettingsReport::summary() const {
+    return "version=" + std::to_string(version) + " applied=" + std::to_string(applied)
+        + " unknown=" + std::to_string(unknown_keys.size())
+        + " invalid=" + std::to_string(invalid_values.size());
 }
 
 Settings load_settings(const std::string& path) {
-    auto pairs = parse_toml_subset(path);
+    SettingsReport ignored;
+    return load_settings(path, ignored);
+}
+
+Settings load_settings(const std::string& path, SettingsReport& report) {
+    std::map<std::string, std::string> pairs = parse_toml_subset(path, &report);
+
+    auto version = pairs.find("version");
+    if (version != pairs.end()) {
+        report.version = to_int(version->second, -1);
+        pairs.erase(version);
+        if (report.version < 0) {
+            report.invalid_values.push_back("version");
+            report.version = 0;
+        } else if (report.version > kSettingsVersion) {
+            report.warnings.push_back("settings version " + std::to_string(report.version)
+                + " is newer than supported " + std::to_string(kSettingsVersion));
+        }
+    }
 
     Settings settings;
-    apply(pairs, "shell.homepage", settings.homepage);
-    apply(pairs, "shell.search_template", settings.search_template);
-    apply(pairs, "shell.window_width", settings.window_width);
-    apply(pairs, "shell.window_height", settings.window_height);
-    apply(pairs, "privacy.private_tabs_enabled", settings.private_tabs_enabled);
-    apply(pairs, "privacy.start_in_private", settings.start_in_private);
-    apply(pairs, "privacy.history_enabled", settings.history_enabled);
-    apply(pairs, "privacy.cookie_policy", settings.cookie_policy);
-    apply(pairs, "privacy.tracking_prevention", settings.tracking_prevention);
-    apply(pairs, "privacy.javascript", settings.javascript_enabled);
-    apply(pairs, "privacy.hyperlink_auditing", settings.hyperlink_auditing);
-    apply(pairs, "privacy.dns_prefetching", settings.dns_prefetching);
-    apply(pairs, "privacy.block_autoplay", settings.block_autoplay);
-    apply(pairs, "privacy.fingerprint_webgl", settings.fingerprint_webgl);
-    apply(pairs, "privacy.fingerprint_canvas", settings.fingerprint_canvas);
-    apply(pairs, "privacy.fingerprint_fonts", settings.fingerprint_fonts);
-    apply(pairs, "privacy.fingerprint_referrer", settings.fingerprint_referrer);
-    apply(pairs, "perf.process_model", settings.process_model);
-    apply(pairs, "perf.startup_budget_ms", settings.startup_budget_ms);
-    apply(pairs, "perf.memory_ceiling_mb", settings.memory_ceiling_mb);
-    apply(pairs, "perf.log", settings.perf_log);
-    apply(pairs, "downloads.dir", settings.downloads_dir);
-    settings.downloads_mode = downloads_mode_value(pairs, "downloads.mode", settings.downloads_mode);
+    apply(pairs, "shell.homepage", settings.homepage, &report);
+    apply(pairs, "shell.search_template", settings.search_template, &report);
+    apply(pairs, "shell.window_width", settings.window_width, &report);
+    apply(pairs, "shell.window_height", settings.window_height, &report);
+    apply(pairs, "privacy.private_tabs_enabled", settings.private_tabs_enabled, &report);
+    apply(pairs, "privacy.start_in_private", settings.start_in_private, &report);
+    apply(pairs, "privacy.history_enabled", settings.history_enabled, &report);
+    apply(pairs, "privacy.cookie_policy", settings.cookie_policy, &report);
+    apply(pairs, "privacy.tracking_prevention", settings.tracking_prevention, &report);
+    apply(pairs, "privacy.javascript", settings.javascript_enabled, &report);
+    apply(pairs, "privacy.hyperlink_auditing", settings.hyperlink_auditing, &report);
+    apply(pairs, "privacy.dns_prefetching", settings.dns_prefetching, &report);
+    apply(pairs, "privacy.block_autoplay", settings.block_autoplay, &report);
+    apply(pairs, "privacy.fingerprint_webgl", settings.fingerprint_webgl, &report);
+    apply(pairs, "privacy.fingerprint_canvas", settings.fingerprint_canvas, &report);
+    apply(pairs, "privacy.fingerprint_fonts", settings.fingerprint_fonts, &report);
+    apply(pairs, "privacy.fingerprint_referrer", settings.fingerprint_referrer, &report);
+    apply(pairs, "perf.process_model", settings.process_model, &report);
+    apply(pairs, "perf.startup_budget_ms", settings.startup_budget_ms, &report);
+    apply(pairs, "perf.memory_ceiling_mb", settings.memory_ceiling_mb, &report);
+    apply(pairs, "perf.log", settings.perf_log, &report);
+    apply(pairs, "downloads.dir", settings.downloads_dir, &report);
+    settings.downloads_mode = downloads_mode_value(pairs, "downloads.mode", settings.downloads_mode, &report);
     double zoom = settings.zoom_default;
-    apply(pairs, "shell.zoom", zoom);
+    apply(pairs, "shell.zoom", zoom, &report);
     settings.zoom_default = clamp_zoom(zoom);
-    settings.permissions_geolocation = permission_value(pairs, "permissions.geolocation", settings.permissions_geolocation);
-    settings.permissions_camera = permission_value(pairs, "permissions.camera", settings.permissions_camera);
-    settings.permissions_microphone = permission_value(pairs, "permissions.microphone", settings.permissions_microphone);
-    settings.permissions_notifications = permission_value(pairs, "permissions.notifications", settings.permissions_notifications);
-    apply(pairs, "security.tls_strict", settings.tls_strict);
-    apply(pairs, "shell.session_restore", settings.session_restore);
-    apply(pairs, "privacy.gpc", settings.gpc);
-    apply(pairs, "privacy.blocklist", settings.blocklist);
-    apply(pairs, "privacy.blocklist_file", settings.blocklist_file);
-    apply(pairs, "privacy.dns_over_https", settings.dns_over_https);
-    settings.proxy_mode = proxy_mode_value(pairs, "proxy.mode", settings.proxy_mode);
-    apply(pairs, "proxy.upstream", settings.proxy_upstream);
-    apply(pairs, "proxy.user", settings.proxy_user);
-    apply(pairs, "proxy.password", settings.proxy_password);
+    settings.permissions_geolocation =
+        permission_value(pairs, "permissions.geolocation", settings.permissions_geolocation, &report);
+    settings.permissions_camera =
+        permission_value(pairs, "permissions.camera", settings.permissions_camera, &report);
+    settings.permissions_microphone =
+        permission_value(pairs, "permissions.microphone", settings.permissions_microphone, &report);
+    settings.permissions_notifications =
+        permission_value(pairs, "permissions.notifications", settings.permissions_notifications, &report);
+    apply(pairs, "security.tls_strict", settings.tls_strict, &report);
+    apply(pairs, "shell.session_restore", settings.session_restore, &report);
+    apply(pairs, "privacy.gpc", settings.gpc, &report);
+    apply(pairs, "privacy.blocklist", settings.blocklist, &report);
+    apply(pairs, "privacy.blocklist_file", settings.blocklist_file, &report);
+    apply(pairs, "privacy.dns_over_https", settings.dns_over_https, &report);
+    settings.proxy_mode = proxy_mode_value(pairs, "proxy.mode", settings.proxy_mode, &report);
+    apply(pairs, "proxy.upstream", settings.proxy_upstream, &report);
+    apply(pairs, "proxy.user", settings.proxy_user, &report);
+    apply(pairs, "proxy.password", settings.proxy_password, &report);
+
+    for (const auto& [key, value] : pairs) {
+        report.unknown_keys.push_back(key);
+    }
     return settings;
 }
 
@@ -179,7 +276,8 @@ void save_settings(const std::string& path, const Settings& settings) {
     std::ofstream out(path);
     if (!out) return;
 
-    out << "[shell]\n";
+    out << "version = " << kSettingsVersion << "\n";
+    out << "\n[shell]\n";
     out << "homepage = \"" << settings.homepage << "\"\n";
     out << "search_template = \"" << settings.search_template << "\"\n";
     out << "window_width = " << settings.window_width << "\n";
