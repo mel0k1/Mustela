@@ -17,7 +17,9 @@
 
 #include "browsing_data.hpp"
 #include "blocklist.hpp"
+#include "bookmarks.hpp"
 #include "config.hpp"
+#include "error_page.hpp"
 #include "fingerprint.hpp"
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
@@ -51,7 +53,10 @@
 #include <WebKit/WKContextMenuItemTypes.h>
 #include <WebKit/WKBackForwardListRef.h>
 #include <WebKit/WKBackForwardListItemRef.h>
+#include <WebKit/WKPreferencesRef.h>
 #include <WebKit/WKPreferencesRefPrivate.h>
+#include <WebKit/WKErrorRef.h>
+#include <WebKit/WKPagePrivate.h>
 #include <WebKit/WKUserContentExtensionStoreRef.h>
 #include <WebKit/WKGeolocationPermissionRequest.h>
 #include <WebKit/WKUserMediaPermissionRequest.h>
@@ -109,6 +114,13 @@ enum : WORD {
     ID_ACC_ZOOM_OUT = 129,
     ID_ACC_ZOOM_RESET = 130,
     ID_ACC_FULLSCREEN = 131,
+    ID_BOOKMARK = 132,
+    ID_ACC_BOOKMARK = 133,
+    ID_ACC_BOOKMARKS = 134,
+    ID_ACC_DEVTOOLS = 135,
+    ID_BOOKMARKS_LIST = 140,
+    ID_BOOKMARKS_OPEN = 141,
+    ID_BOOKMARKS_REMOVE = 142,
     ID_PERM_ALLOW = 300,
     ID_PERM_DENY = 301,
     ID_PERM_ALWAYS = 302,
@@ -265,6 +277,7 @@ struct Browser {
     PrivacyPolicy privacy;
     std::unique_ptr<SiteRules> sites;
     std::unique_ptr<mustela::HistoryStore> history;
+    std::unique_ptr<mustela::BookmarkStore> bookmarks;
 
     HWND window = nullptr;
     HWND back_btn = nullptr;
@@ -273,11 +286,14 @@ struct Browser {
     HWND new_tab_btn = nullptr;
     HWND close_tab_btn = nullptr;
     HWND private_toggle = nullptr;
+    HWND bookmark_btn = nullptr;
     HWND url_entry = nullptr;
     HWND tab_ctrl = nullptr;
     HWND status_bar = nullptr;
     HWND history_window = nullptr;
     HWND history_list = nullptr;
+    HWND bookmarks_window = nullptr;
+    HWND bookmarks_list = nullptr;
     HWND find_edit = nullptr;
     HWND find_count = nullptr;
     HWND find_prev_btn = nullptr;
@@ -303,6 +319,8 @@ struct Browser {
     std::vector<std::unique_ptr<WinTab>> tabs;
     int active = -1;
     std::vector<std::string> history_urls;
+    std::vector<std::string> bookmark_urls;
+    bool bookmark_marked = false;
     bool find_visible = false;
     std::string find_query;
     std::string hover_link;
@@ -324,6 +342,8 @@ struct WinTab {
     std::string title;
     double scale = 1.0;
     int crashes = 0;
+    bool error_page = false;
+    std::string error_page_uri;
     mustela::LoadTimer load;
 };
 
@@ -506,6 +526,7 @@ void apply_view_policy(WinTab& tab, const std::string& uri) {
 void apply_policies_to_tabs(Browser& b) {
     for (std::unique_ptr<WinTab>& tab : b.tabs) {
         harden_preferences(tab->preferences, b.privacy.hardening);
+        WKPreferencesSetDeveloperExtrasEnabled(tab->preferences, b.settings.devtools ? TRUE : FALSE);
         apply_cookie_policy(tab->store, b.privacy.cookies);
         apply_itp(tab->store, b.privacy.hardening.tracking_prevention);
         apply_view_policy(*tab, tab->uri);
@@ -727,6 +748,11 @@ void refresh_chrome(Browser& b) {
         EnableWindow(b.reload_btn, FALSE);
         EnableWindow(b.close_tab_btn, FALSE);
     }
+    bool marked = tab && b.bookmarks && b.bookmarks->contains(tab->uri);
+    if (b.bookmark_btn && marked != b.bookmark_marked) {
+        b.bookmark_marked = marked;
+        SetWindowTextW(b.bookmark_btn, marked ? L"\u2605" : L"\u2606");
+    }
     update_window_title(b);
     refresh_status(b);
 }
@@ -807,8 +833,16 @@ void did_change_can_go_forward(const void* client_info) {
     on_tab_state_changed(tab);
 }
 
-void did_start_provisional_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* client_info) {
+void did_start_provisional_navigation(WKPageRef page, WKNavigationRef, WKTypeRef, const void* client_info) {
     WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (tab.error_page) {
+        WkHold target(page ? WKPageCopyActiveURL(page) : nullptr);
+        std::string url = target.ref ? wkurl_to_std(static_cast<WKURLRef>(target.ref)) : std::string();
+        if (url != tab.error_page_uri) {
+            tab.error_page = false;
+            tab.error_page_uri.clear();
+        }
+    }
     tab.load.start(mustela::Stopwatch::now_ms());
 }
 
@@ -821,8 +855,14 @@ void did_commit_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* cl
 
 void did_finish_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* client_info) {
     WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
-    if (!browser || tab.uri.empty()) return;
+    if (!browser) return;
     tab.crashes = 0;
+    if (tab.error_page) {
+        save_session_now(*browser);
+        on_tab_state_changed(tab);
+        return;
+    }
+    if (tab.uri.empty()) return;
     if (browser->privacy.records_history(tab.privacy)) {
         browser->history->record(tab.uri, tab.title, static_cast<std::int64_t>(std::time(nullptr)));
     }
@@ -834,12 +874,48 @@ void did_finish_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* cl
     on_tab_state_changed(tab);
 }
 
-void did_fail_provisional_navigation(WKPageRef, WKNavigationRef, WKErrorRef, WKTypeRef, const void* client_info) {
+void did_fail_provisional_navigation(WKPageRef, WKNavigationRef, WKErrorRef error, WKTypeRef, const void* client_info) {
     WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
     if (!browser) return;
     tab.load.cancel();
     on_tab_state_changed(tab);
-    flash_status(*browser, "load failed");
+    if (!error) {
+        flash_status(*browser, "load failed");
+        return;
+    }
+    int code = WKErrorGetErrorCode(error);
+    if (code == kWKErrorCodeCancelled || code == kWKErrorCodeFrameLoadInterruptedByPolicyChange) return;
+    WkHold failing(WKErrorCopyFailingURL(error));
+    std::string url = failing.ref ? wkurl_to_std(static_cast<WKURLRef>(failing.ref)) : std::string();
+    if (url.empty()) {
+        flash_status(*browser, "load failed");
+        return;
+    }
+    const char* heading = "Could not connect";
+    switch (code) {
+        case kWKErrorCodeCannotShowMIMEType: heading = "Can't show this content"; break;
+        case kWKErrorCodeCannotShowURL: heading = "Unsupported address"; break;
+        case kWKErrorCodeCannotUseRestrictedPort: heading = "Port blocked"; break;
+        case kWKErrorCodeFileDoesNotExist: heading = "File not found"; break;
+        case kWKErrorCodeFrameLoadBlockedByContentBlocker:
+        case kWKErrorCodeFrameLoadBlockedByContentFilter:
+        case kWKErrorCodeFrameLoadBlockedByRestrictions:
+        case kWKErrorCodeCannotFindPlugIn:
+        case kWKErrorCodeCannotLoadPlugIn:
+        case kWKErrorCodeJavaUnavailable: heading = "Navigation blocked"; break;
+        default: break;
+    }
+    WkHold description(WKErrorCopyLocalizedDescription(error));
+    std::string html = mustela::branded_error_page(heading,
+        description.ref ? wkstring_to_std(static_cast<WKStringRef>(description.ref)) : std::string(), url);
+    WkHold html_text(make_wkstring(html));
+    WkHold base(make_wkurl(url));
+    if (!tab.page) return;
+    WKPageLoadHTMLString(tab.page, static_cast<WKStringRef>(html_text.ref),
+        static_cast<WKURLRef>(base.ref));
+    tab.error_page = true;
+    tab.error_page_uri = url;
+    flash_status(*browser, heading);
 }
 
 int append_tab(Browser& b, std::unique_ptr<WinTab> tab) {
@@ -1636,6 +1712,7 @@ std::unique_ptr<WinTab> make_tab(TabPrivacy request) {
 
     tab->preferences = WKPreferencesCreate();
     harden_preferences(tab->preferences, browser->privacy.hardening);
+    WKPreferencesSetDeveloperExtrasEnabled(tab->preferences, browser->settings.devtools ? TRUE : FALSE);
 
     tab->content = WKUserContentControllerCreate();
 
@@ -1797,6 +1874,110 @@ LRESULT CALLBACK history_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lpar
     }
 }
 
+void fill_bookmarks_list(Browser& b) {
+    if (!b.bookmarks_list) return;
+    SendMessageW(b.bookmarks_list, LB_RESETCONTENT, 0, 0);
+    b.bookmark_urls.clear();
+    if (!b.bookmarks) return;
+    for (const mustela::BookmarkEntry& entry : b.bookmarks->entries()) {
+        b.bookmark_urls.push_back(entry.url);
+        std::wstring line = to_wide(entry.title.empty() ? entry.url : entry.title + "  —  " + entry.url);
+        SendMessageW(b.bookmarks_list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+    }
+}
+
+void open_bookmarks_window(Browser& b) {
+    if (b.bookmarks_window) {
+        ShowWindow(b.bookmarks_window, SW_RESTORE);
+        SetForegroundWindow(b.bookmarks_window);
+        return;
+    }
+    b.bookmarks_window = CreateWindowExW(0, L"MUSTELA_BOOKMARKS_WND", L"Bookmarks — Mustela",
+        WS_OVERLAPPEDWINDOW | WS_CAPTION, CW_USEDEFAULT, CW_USEDEFAULT, 700, 480,
+        b.window, nullptr, GetModuleHandleW(nullptr), nullptr);
+    fill_bookmarks_list(b);
+    ShowWindow(b.bookmarks_window, SW_SHOW);
+    UpdateWindow(b.bookmarks_window);
+}
+
+void toggle_bookmark(Browser& b) {
+    WinTab* tab = active_tab(b);
+    if (!tab || !b.bookmarks || tab->uri.empty()) return;
+    if (b.bookmarks->contains(tab->uri)) {
+        b.bookmarks->remove(tab->uri);
+        flash_status(b, "bookmark removed");
+    } else {
+        b.bookmarks->add(tab->uri, tab->title, static_cast<std::int64_t>(std::time(nullptr)));
+        flash_status(b, "bookmark added");
+    }
+    refresh_chrome(b);
+}
+
+LRESULT CALLBACK bookmarks_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (!browser) return DefWindowProcW(wnd, message, wparam, lparam);
+    Browser& b = *browser;
+    switch (message) {
+        case WM_CREATE: {
+            RECT client = {};
+            GetClientRect(wnd, &client);
+            b.bookmarks_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                12, 12, client.right - 24, client.bottom - 72, wnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_BOOKMARKS_LIST)), GetModuleHandleW(nullptr), nullptr);
+            CreateWindowExW(0, WC_BUTTONW, L"Open", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                12, client.bottom - 48, 140, 32, wnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_BOOKMARKS_OPEN)), GetModuleHandleW(nullptr), nullptr);
+            CreateWindowExW(0, WC_BUTTONW, L"Remove", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                162, client.bottom - 48, 140, 32, wnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_BOOKMARKS_REMOVE)), GetModuleHandleW(nullptr), nullptr);
+            return 0;
+        }
+        case WM_SIZE: {
+            if (b.bookmarks_list) {
+                MoveWindow(b.bookmarks_list, 12, 12, LOWORD(lparam) - 24, HIWORD(lparam) - 72, TRUE);
+                MoveWindow(GetDlgItem(wnd, ID_BOOKMARKS_OPEN), 12, HIWORD(lparam) - 48, 140, 32, TRUE);
+                MoveWindow(GetDlgItem(wnd, ID_BOOKMARKS_REMOVE), 162, HIWORD(lparam) - 48, 140, 32, TRUE);
+            }
+            return 0;
+        }
+        case WM_COMMAND: {
+            if (LOWORD(wparam) == ID_BOOKMARKS_OPEN) {
+                int selected = static_cast<int>(SendMessageW(b.bookmarks_list, LB_GETCURSEL, 0, 0));
+                if (selected >= 0 && selected < static_cast<int>(b.bookmark_urls.size())) {
+                    open_tab(b, b.bookmark_urls[static_cast<size_t>(selected)], TabPrivacy::Normal);
+                }
+            }
+            if (LOWORD(wparam) == ID_BOOKMARKS_REMOVE) {
+                int selected = static_cast<int>(SendMessageW(b.bookmarks_list, LB_GETCURSEL, 0, 0));
+                if (selected >= 0 && selected < static_cast<int>(b.bookmark_urls.size())) {
+                    std::string url = b.bookmark_urls[static_cast<size_t>(selected)];
+                    if (b.bookmarks->remove(url)) {
+                        fill_bookmarks_list(b);
+                        refresh_chrome(b);
+                        flash_status(b, "bookmark removed");
+                    }
+                }
+            }
+            if (LOWORD(wparam) == ID_BOOKMARKS_LIST && HIWORD(wparam) == LBN_DBLCLK) {
+                int selected = static_cast<int>(SendMessageW(b.bookmarks_list, LB_GETCURSEL, 0, 0));
+                if (selected >= 0 && selected < static_cast<int>(b.bookmark_urls.size())) {
+                    open_tab(b, b.bookmark_urls[static_cast<size_t>(selected)], TabPrivacy::Normal);
+                }
+            }
+            return 0;
+        }
+        case WM_CLOSE:
+            DestroyWindow(wnd);
+            return 0;
+        case WM_DESTROY:
+            b.bookmarks_window = nullptr;
+            b.bookmarks_list = nullptr;
+            return 0;
+        default:
+            return DefWindowProcW(wnd, message, wparam, lparam);
+    }
+}
+
 DWORD WINAPI watcher_main(LPVOID) {
     Browser& b = *browser;
     HANDLE dir = CreateFileW(app_base_dir().c_str(), FILE_LIST_DIRECTORY,
@@ -1872,7 +2053,8 @@ void layout_window(Browser& b, int width, int height) {
     MoveWindow(b.forward_btn, 52, toolbar_y, 40, toolbar_h, TRUE);
     MoveWindow(b.reload_btn, 96, toolbar_y, 40, toolbar_h, TRUE);
     MoveWindow(b.close_tab_btn, 140, toolbar_y, 28, toolbar_h, TRUE);
-    MoveWindow(b.url_entry, 176, toolbar_y, width - 292, toolbar_h, TRUE);
+    MoveWindow(b.bookmark_btn, 172, toolbar_y, 28, toolbar_h, TRUE);
+    MoveWindow(b.url_entry, 204, toolbar_y, width - 320, toolbar_h, TRUE);
     MoveWindow(b.new_tab_btn, width - 112, toolbar_y, 28, toolbar_h, TRUE);
     MoveWindow(b.private_toggle, width - 80, toolbar_y, 72, toolbar_h, TRUE);
 
@@ -2020,6 +2202,18 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
                 case ID_ACC_HISTORY:
                     open_history_window(b);
                     return 0;
+                case ID_BOOKMARK:
+                case ID_ACC_BOOKMARK:
+                    toggle_bookmark(b);
+                    return 0;
+                case ID_ACC_BOOKMARKS:
+                    open_bookmarks_window(b);
+                    return 0;
+                case ID_ACC_DEVTOOLS: {
+                    WinTab* tab = active_tab(b);
+                    if (tab && tab->page) WKPageShowWebInspectorForTesting(tab->page);
+                    return 0;
+                }
                 case ID_ACC_FIND:
                     show_find_ui(b, true);
                     return 0;
@@ -2217,6 +2411,7 @@ int mustela_main(int argc, char** argv) {
     b.sites = std::make_unique<SiteRules>(config_path("sites.toml"));
     b.sites->load();
     b.history = std::make_unique<mustela::HistoryStore>(profile_path("history.tsv"));
+    b.bookmarks = std::make_unique<mustela::BookmarkStore>(profile_path("bookmarks.tsv"));
     b.perf = std::make_unique<mustela::PerfLog>(profile_path("perf.jsonl"));
     configure_proxy(b);
 
@@ -2283,6 +2478,11 @@ int mustela_main(int argc, char** argv) {
     history_class.lpszClassName = L"MUSTELA_HISTORY_WND";
     RegisterClassW(&history_class);
 
+    WNDCLASSW bookmarks_class = main_class;
+    bookmarks_class.lpfnWndProc = bookmarks_proc;
+    bookmarks_class.lpszClassName = L"MUSTELA_BOOKMARKS_WND";
+    RegisterClassW(&bookmarks_class);
+
     int width = b.settings.window_width;
     int height = b.settings.window_height;
     HWND window = CreateWindowExW(0, L"MUSTELA_MAIN_WND", L"Mustela", WS_OVERLAPPEDWINDOW,
@@ -2297,8 +2497,10 @@ int mustela_main(int argc, char** argv) {
         96, 8, 40, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_RELOAD)), GetModuleHandleW(nullptr), nullptr);
     b.close_tab_btn = CreateWindowExW(0, WC_BUTTONW, L"×", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         140, 8, 28, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CLOSE_TAB)), GetModuleHandleW(nullptr), nullptr);
+    b.bookmark_btn = CreateWindowExW(0, WC_BUTTONW, L"☆", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        172, 8, 28, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_BOOKMARK)), GetModuleHandleW(nullptr), nullptr);
     b.url_entry = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-        176, 8, width - 292, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_URL)), GetModuleHandleW(nullptr), nullptr);
+        204, 8, width - 320, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_URL)), GetModuleHandleW(nullptr), nullptr);
     SetWindowSubclass(b.url_entry, url_edit_subclass, URL_SUBCLASS_ID, 0);
     b.new_tab_btn = CreateWindowExW(0, WC_BUTTONW, L"+", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         width - 112, 8, 28, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NEW_TAB)), GetModuleHandleW(nullptr), nullptr);
@@ -2344,9 +2546,13 @@ int mustela_main(int argc, char** argv) {
         {FVIRTKEY | FCONTROL, VK_OEM_MINUS, ID_ACC_ZOOM_OUT},
         {FVIRTKEY | FCONTROL, VK_SUBTRACT, ID_ACC_ZOOM_OUT},
         {FVIRTKEY | FCONTROL, '0', ID_ACC_ZOOM_RESET},
-        {FVIRTKEY, VK_F11, ID_ACC_FULLSCREEN}
+        {FVIRTKEY, VK_F11, ID_ACC_FULLSCREEN},
+        {FVIRTKEY | FCONTROL, 'D', ID_ACC_BOOKMARK},
+        {FVIRTKEY | FCONTROL | FSHIFT, 'O', ID_ACC_BOOKMARKS},
+        {FVIRTKEY | FCONTROL | FSHIFT, 'I', ID_ACC_DEVTOOLS},
+        {FVIRTKEY, VK_F12, ID_ACC_DEVTOOLS}
     };
-    HACCEL accel = CreateAcceleratorTableW(accelerators, 16);
+    HACCEL accel = CreateAcceleratorTableW(accelerators, 20);
 
     b.watcher_thread = CreateThread(nullptr, 0, watcher_main, nullptr, 0, nullptr);
 
