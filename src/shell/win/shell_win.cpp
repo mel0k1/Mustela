@@ -19,11 +19,17 @@
 #include "perf.hpp"
 #include "privacy.hpp"
 #include "site_rules.hpp"
+#include "ui_text.hpp"
 #include "url.hpp"
 
 #include <WebKit/WebKit2_C.h>
 #include <WebKit/WKContext.h>
 #include <WebKit/WKView.h>
+#include <WebKit/WKPage.h>
+#include <WebKit/WKPageUIClient.h>
+#include <WebKit/WKPageFindClient.h>
+#include <WebKit/WKFindOptions.h>
+#include <WebKit/WKHitTestResultRef.h>
 #include <WebKit/WKContextConfigurationRef.h>
 #include <WebKit/WKWebsiteDataStoreRef.h>
 #include <WebKit/WKWebsiteDataStoreConfigurationRef.h>
@@ -70,10 +76,20 @@ enum : WORD {
     ID_ACC_CLEAR_DATA = 118,
     ID_ACC_HISTORY = 119,
     ID_ACC_BACK = 120,
-    ID_ACC_FORWARD = 121
+    ID_ACC_FORWARD = 121,
+    ID_FIND_EDIT = 122,
+    ID_FIND_NEXT = 123,
+    ID_FIND_PREV = 124,
+    ID_FIND_CLOSE = 125,
+    ID_ACC_FIND = 126,
+    ID_FIND_COUNT = 127,
+    ID_PROMPT_TEXT = 200,
+    ID_PROMPT_EDIT = 201
 };
 
 const UINT WM_APP_RELOAD_CHANGED = WM_APP + 1;
+const UINT WM_APP_CLOSE_TAB = WM_APP + 2;
+const UINT WM_APP_PROMPT_DONE = WM_APP + 3;
 const UINT TIMER_FLASH = 1;
 const UINT TIMER_RELOAD = 2;
 const UINT TIMER_WATCH = 3;
@@ -85,6 +101,20 @@ LRESULT CALLBACK url_edit_subclass(HWND wnd, UINT message, WPARAM wparam, LPARAM
     UINT_PTR, DWORD_PTR) {
     if (message == WM_KEYDOWN && wparam == VK_RETURN) {
         SendMessageW(GetParent(wnd), WM_COMMAND, MAKEWPARAM(ID_URL, ID_URL_ENTER), 0);
+        return 0;
+    }
+    return DefSubclassProc(wnd, message, wparam, lparam);
+}
+
+LRESULT CALLBACK find_edit_subclass(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam,
+    UINT_PTR, DWORD_PTR) {
+    if (message == WM_KEYDOWN && wparam == VK_RETURN) {
+        bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        SendMessageW(GetParent(wnd), WM_COMMAND, MAKEWPARAM(shift ? ID_FIND_PREV : ID_FIND_NEXT, 0), 0);
+        return 0;
+    }
+    if (message == WM_KEYDOWN && wparam == VK_ESCAPE) {
+        SendMessageW(GetParent(wnd), WM_COMMAND, MAKEWPARAM(ID_FIND_CLOSE, 0), 0);
         return 0;
     }
     return DefSubclassProc(wnd, message, wparam, lparam);
@@ -210,6 +240,11 @@ struct Browser {
     HWND status_bar = nullptr;
     HWND history_window = nullptr;
     HWND history_list = nullptr;
+    HWND find_edit = nullptr;
+    HWND find_count = nullptr;
+    HWND find_prev_btn = nullptr;
+    HWND find_next_btn = nullptr;
+    HWND find_close_btn = nullptr;
 
     WKContextRef context = nullptr;
     WKWebsiteDataStoreRef persistent_store = nullptr;
@@ -224,6 +259,9 @@ struct Browser {
     std::vector<std::unique_ptr<WinTab>> tabs;
     int active = -1;
     std::vector<std::string> history_urls;
+    bool find_visible = false;
+    std::string find_query;
+    std::string hover_link;
 
     bool status_flash = false;
     std::atomic<bool> watcher_stop{false};
@@ -248,13 +286,6 @@ Browser* browser = nullptr;
 WinTab* active_tab(Browser& b) {
     if (b.active < 0 || b.active >= static_cast<int>(b.tabs.size())) return nullptr;
     return b.tabs[static_cast<size_t>(b.active)].get();
-}
-
-WinTab* tab_from_page(WKPageRef page) {
-    for (std::unique_ptr<WinTab>& tab : browser->tabs) {
-        if (tab->page == page) return tab.get();
-    }
-    return nullptr;
 }
 
 int tab_index(const Browser& b, const WinTab* tab) {
@@ -284,6 +315,12 @@ void apply_itp(WKWebsiteDataStoreRef store, bool enabled) {
 void refresh_status(Browser& b);
 void flash_status(Browser& b, const std::string& text);
 void mark_startup(Browser& b);
+void close_tab(Browser& b, int index);
+void layout_window(Browser& b, int width, int height);
+void find_run(Browser& b, int direction);
+void show_find_ui(Browser& b, bool show);
+std::unique_ptr<WinTab> make_tab(TabPrivacy request);
+std::string run_modal_prompt(const std::string& message, const std::string& default_text);
 
 void record_perf(Browser& b, const std::string& kind, double value_ms, std::int64_t value_bytes,
     const std::string& detail) {
@@ -476,11 +513,16 @@ std::string compose_status(Browser& b) {
 
 void refresh_status(Browser& b) {
     if (!b.status_bar) return;
-    std::string text = compose_status(b);
-    WinTab* tab = active_tab(b);
-    if (tab && tab->page && WKPageGetEstimatedProgress(tab->page) < 1.0) {
-        double progress = WKPageGetEstimatedProgress(tab->page);
-        text = "loading " + std::to_string(static_cast<int>(progress * 100.0)) + "% · " + text;
+    std::string text;
+    if (!b.hover_link.empty()) {
+        text = "→ " + b.hover_link;
+    } else {
+        text = compose_status(b);
+        WinTab* tab = active_tab(b);
+        if (tab && tab->page && WKPageGetEstimatedProgress(tab->page) < 1.0) {
+            double progress = WKPageGetEstimatedProgress(tab->page);
+            text = "loading " + std::to_string(static_cast<int>(progress * 100.0)) + "% · " + text;
+        }
     }
     SendMessageW(b.status_bar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(to_wide(text).c_str()));
 }
@@ -531,12 +573,14 @@ void switch_tab(Browser& b, int index) {
         ShowWindow(WKViewGetWindow(b.tabs[static_cast<size_t>(b.active)]->view), SW_HIDE);
     }
     b.active = index;
+    b.hover_link.clear();
     SendMessageW(b.tab_ctrl, TCM_SETCURSEL, static_cast<WPARAM>(index), 0);
     WinTab& tab = *b.tabs[static_cast<size_t>(index)];
     position_view(b, tab);
     ShowWindow(WKViewGetWindow(tab.view), SW_SHOW);
     SetFocus(WKViewGetWindow(tab.view));
     refresh_chrome(b);
+    if (b.find_visible) find_run(b, 0);
 }
 
 void on_tab_state_changed(WinTab& tab) {
@@ -620,6 +664,250 @@ void did_fail_provisional_navigation(WKPageRef, WKNavigationRef, WKErrorRef, WKT
     flash_status(*browser, "load failed");
 }
 
+int append_tab(Browser& b, std::unique_ptr<WinTab> tab) {
+    WinTab* raw = tab.get();
+    b.tabs.push_back(std::move(tab));
+    int index = static_cast<int>(b.tabs.size()) - 1;
+
+    TCITEMW item = {};
+    item.mask = TCIF_TEXT;
+    std::wstring label = to_wide(tab_label(*raw));
+    item.pszText = label.data();
+    SendMessageW(b.tab_ctrl, TCM_INSERTITEMW, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(&item));
+    return index;
+}
+
+std::string dialog_text(WKStringRef text) {
+    return mustela::sanitize_dialog_text(wkstring_to_std(text));
+}
+
+WKPageRef uic_create_new_page(WKPageRef, WKPageConfigurationRef, WKNavigationActionRef, WKWindowFeaturesRef,
+    const void* client_info) {
+    WinTab& origin = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    int index = append_tab(*browser, make_tab(origin.privacy));
+    WinTab* popup = browser->tabs[static_cast<size_t>(index)].get();
+    WKRetain(popup->page);
+    return popup->page;
+}
+
+void uic_show_page(WKPageRef, const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    int index = tab_index(*browser, &tab);
+    if (index >= 0) switch_tab(*browser, index);
+}
+
+void uic_close(WKPageRef, const void* client_info) {
+    PostMessageW(browser->window, WM_APP_CLOSE_TAB,
+        reinterpret_cast<WPARAM>(const_cast<void*>(client_info)), 0);
+}
+
+void uic_run_js_alert(WKPageRef, WKStringRef alert_text, WKFrameRef, WKSecurityOriginRef,
+    WKPageRunJavaScriptAlertResultListenerRef listener, const void*) {
+    std::string body = dialog_text(alert_text);
+    MessageBoxW(browser->window, to_wide(body).c_str(), L"Mustela",
+        MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+    if (listener) WKPageRunJavaScriptAlertResultListenerCall(listener);
+}
+
+void uic_run_js_confirm(WKPageRef, WKStringRef message, WKFrameRef, WKSecurityOriginRef,
+    WKPageRunJavaScriptConfirmResultListenerRef listener, const void*) {
+    std::string body = dialog_text(message);
+    int choice = MessageBoxW(browser->window, to_wide(body).c_str(), L"Mustela",
+        MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND);
+    if (listener) WKPageRunJavaScriptConfirmResultListenerCall(listener, choice == IDYES ? TRUE : FALSE);
+}
+
+void uic_run_js_prompt(WKPageRef, WKStringRef message, WKStringRef default_value, WKFrameRef, WKSecurityOriginRef,
+    WKPageRunJavaScriptPromptResultListenerRef listener, const void*) {
+    std::string value = run_modal_prompt(wkstring_to_std(message),
+        default_value ? wkstring_to_std(default_value) : std::string());
+    WkHold result(make_wkstring(value));
+    if (listener) WKPageRunJavaScriptPromptResultListenerCall(listener, static_cast<WKStringRef>(result.ref));
+}
+
+bool uic_run_before_unload(WKPageRef, WKStringRef message, WKFrameRef, const void*) {
+    std::string body = dialog_text(message);
+    if (body.empty()) body = "Leave this site?";
+    int choice = MessageBoxW(browser->window, to_wide(body).c_str(), L"Leave site? — Mustela",
+        MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND);
+    return choice == IDYES;
+}
+
+void uic_set_status_text(WKPageRef, WKStringRef text, const void* client_info) {
+    Browser& b = *browser;
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (active_tab(b) != &tab) return;
+    b.hover_link = text ? wkstring_to_std(text) : std::string();
+    refresh_status(b);
+}
+
+void uic_mouse_did_move_over_element(WKPageRef, WKHitTestResultRef hit_test, WKEventModifiers, WKTypeRef,
+    const void* client_info) {
+    Browser& b = *browser;
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (active_tab(b) != &tab) return;
+    WkHold url(WKHitTestResultCopyAbsoluteLinkURL(hit_test));
+    b.hover_link = url.ref ? wkurl_to_std(static_cast<WKURLRef>(url.ref)) : std::string();
+    refresh_status(b);
+}
+
+void find_did_find(WKPageRef, WKStringRef, unsigned match_count, const void*) {
+    Browser& b = *browser;
+    if (!b.find_visible || !b.find_count) return;
+    std::string label = std::to_string(match_count) + (match_count == 1 ? " match" : " matches");
+    SetWindowTextW(b.find_count, to_wide(label).c_str());
+}
+
+void find_did_fail(WKPageRef, WKStringRef, const void*) {
+    Browser& b = *browser;
+    if (!b.find_visible || !b.find_count) return;
+    SetWindowTextW(b.find_count, L"no matches");
+}
+
+void find_run(Browser& b, int direction) {
+    WinTab* tab = active_tab(b);
+    if (!tab || !tab->page || !b.find_edit) return;
+    std::string query = mustela::sanitize_find_query(to_utf8(get_window_text(b.find_edit)));
+    if (query.empty()) {
+        b.find_query.clear();
+        WKPageHideFindUI(tab->page);
+        SetWindowTextW(b.find_count, L"");
+        return;
+    }
+    WKFindOptions options = static_cast<WKFindOptions>(
+        kWKFindOptionsCaseInsensitive | kWKFindOptionsWrapAround | kWKFindOptionsShowOverlay);
+    if (direction < 0) options = static_cast<WKFindOptions>(options | kWKFindOptionsBackwards);
+    WkHold text(make_wkstring(query));
+    b.find_query = query;
+    WKPageFindString(tab->page, static_cast<WKStringRef>(text.ref), options, 1000);
+}
+
+void show_find_ui(Browser& b, bool show) {
+    if (!b.find_edit) return;
+    b.find_visible = show;
+    UINT flags = show ? SW_SHOW : SW_HIDE;
+    ShowWindow(b.find_edit, flags);
+    ShowWindow(b.find_count, flags);
+    ShowWindow(b.find_prev_btn, flags);
+    ShowWindow(b.find_next_btn, flags);
+    ShowWindow(b.find_close_btn, flags);
+    if (show) {
+        SetFocus(b.find_edit);
+    } else {
+        b.find_query.clear();
+        SetWindowTextW(b.find_count, L"");
+        WinTab* tab = active_tab(b);
+        if (tab && tab->page) WKPageHideFindUI(tab->page);
+        if (tab) SetFocus(WKViewGetWindow(tab->view));
+    }
+    RECT client = {};
+    if (b.window && GetClientRect(b.window, &client)) {
+        layout_window(b, client.right, client.bottom);
+    }
+}
+
+struct PromptState {
+    std::wstring text;
+    bool confirmed = false;
+};
+
+LRESULT CALLBACK prompt_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    PromptState* state = reinterpret_cast<PromptState*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
+    switch (message) {
+        case WM_CREATE: {
+            auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+            SetWindowLongPtrW(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+            return 0;
+        }
+        case WM_COMMAND:
+            if (!state) return 0;
+            if (LOWORD(wparam) == IDOK) {
+                state->confirmed = true;
+                state->text = get_window_text(GetDlgItem(wnd, ID_PROMPT_EDIT));
+                DestroyWindow(wnd);
+                return 0;
+            }
+            if (LOWORD(wparam) == IDCANCEL) {
+                DestroyWindow(wnd);
+                return 0;
+            }
+            return 0;
+        case WM_CLOSE:
+            DestroyWindow(wnd);
+            return 0;
+        case WM_DESTROY:
+            PostThreadMessageW(GetCurrentThreadId(), WM_APP_PROMPT_DONE, 0, 0);
+            return 0;
+        default:
+            return DefWindowProcW(wnd, message, wparam, lparam);
+    }
+}
+
+std::string run_modal_prompt(const std::string& message, const std::string& default_text) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW prompt_class = {};
+        prompt_class.lpfnWndProc = prompt_proc;
+        prompt_class.hInstance = GetModuleHandleW(nullptr);
+        prompt_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+        prompt_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        prompt_class.lpszClassName = L"MUSTELA_PROMPT_WND";
+        RegisterClassW(&prompt_class);
+        registered = true;
+    }
+
+    PromptState state;
+    HWND owner = browser->window;
+    RECT owner_rect = {};
+    GetWindowRect(owner, &owner_rect);
+    int width = 440;
+    int height = 200;
+    int x = owner_rect.left + ((owner_rect.right - owner_rect.left) - width) / 2;
+    int y = owner_rect.top + ((owner_rect.bottom - owner_rect.top) - height) / 3;
+
+    HWND wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MUSTELA_PROMPT_WND", L"Mustela",
+        WS_CAPTION | WS_SYSMENU, x, y, width, height, owner, nullptr, GetModuleHandleW(nullptr), &state);
+    if (!wnd) return std::string();
+    CreateWindowExW(0, L"STATIC", to_wide(mustela::sanitize_dialog_text(message, 2048)).c_str(),
+        WS_CHILD | WS_VISIBLE, 14, 14, width - 28, 70, wnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_PROMPT_TEXT)), GetModuleHandleW(nullptr), nullptr);
+    HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", to_wide(default_text).c_str(),
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP, 14, 90, width - 28, 30, wnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_PROMPT_EDIT)), GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, WC_BUTTONW, L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+        width - 204, 130, 92, 34, wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, WC_BUTTONW, L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+        width - 106, 130, 92, 34, wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(edit, EM_SETLIMITTEXT, 4096, 0);
+
+    EnableWindow(owner, FALSE);
+    ShowWindow(wnd, SW_SHOW);
+    UpdateWindow(wnd);
+    SetForegroundWindow(wnd);
+    SetFocus(edit);
+    SendMessageW(edit, EM_SETSEL, 0, -1);
+
+    for (;;) {
+        MSG msg = {};
+        int got = GetMessageW(&msg, nullptr, 0, 0);
+        if (got <= 0) {
+            if (got == 0) PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (msg.message == WM_APP_PROMPT_DONE) break;
+        if (!IsDialogMessageW(wnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!IsWindow(wnd)) break;
+    }
+
+    EnableWindow(owner, TRUE);
+    SetActiveWindow(owner);
+    if (IsWindow(wnd)) DestroyWindow(wnd);
+    return state.confirmed ? to_utf8(state.text) : std::string();
+}
+
 void set_page_clients(WinTab& tab) {
     WKPageStateClientV0 state = {};
     state.base.version = 0;
@@ -640,6 +928,27 @@ void set_page_clients(WinTab& tab) {
     navigation.didFinishNavigation = did_finish_navigation;
     navigation.didFailProvisionalNavigation = did_fail_provisional_navigation;
     WKPageSetPageNavigationClient(tab.page, &navigation.base);
+
+    WKPageUIClientV6 ui = {};
+    ui.base.version = 6;
+    ui.base.clientInfo = &tab;
+    ui.createNewPage = uic_create_new_page;
+    ui.showPage = uic_show_page;
+    ui.close = uic_close;
+    ui.runJavaScriptAlert = uic_run_js_alert;
+    ui.runJavaScriptConfirm = uic_run_js_confirm;
+    ui.runJavaScriptPrompt = uic_run_js_prompt;
+    ui.runBeforeUnloadConfirmPanel = uic_run_before_unload;
+    ui.setStatusText = uic_set_status_text;
+    ui.mouseDidMoveOverElement = uic_mouse_did_move_over_element;
+    WKPageSetPageUIClient(tab.page, &ui.base);
+
+    WKPageFindClientV0 find = {};
+    find.base.version = 0;
+    find.base.clientInfo = &tab;
+    find.didFindString = find_did_find;
+    find.didFailToFindString = find_did_fail;
+    WKPageSetPageFindClient(tab.page, &find.base);
 }
 
 std::unique_ptr<WinTab> make_tab(TabPrivacy request) {
@@ -698,14 +1007,7 @@ void load_url_text(Browser& b, const std::string& text) {
 int open_tab(Browser& b, const std::string& url, TabPrivacy request) {
     std::unique_ptr<WinTab> tab = make_tab(request);
     WinTab* raw = tab.get();
-    b.tabs.push_back(std::move(tab));
-    int index = static_cast<int>(b.tabs.size()) - 1;
-
-    TCITEMW item = {};
-    item.mask = TCIF_TEXT;
-    std::wstring label = to_wide(tab_label(*raw));
-    item.pszText = label.data();
-    SendMessageW(b.tab_ctrl, TCM_INSERTITEMW, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(&item));
+    int index = append_tab(b, std::move(tab));
 
     if (!url.empty()) navigate_tab(*raw, url);
     switch_tab(b, index);
@@ -884,7 +1186,17 @@ void layout_window(Browser& b, int width, int height) {
     GetWindowRect(b.status_bar, &status_rect);
     int status_h = status_rect.bottom - status_rect.top;
 
-    RECT view_area = {4, tabs_y + tabs_h, width - 4, height - status_h};
+    int find_h = b.find_visible ? 34 : 0;
+    if (b.find_visible && b.find_edit) {
+        int find_y = tabs_y + tabs_h + 3;
+        MoveWindow(b.find_edit, 8, find_y, width - 244, 28, TRUE);
+        MoveWindow(b.find_count, width - 228, find_y + 5, 104, 22, TRUE);
+        MoveWindow(b.find_prev_btn, width - 116, find_y, 28, 28, TRUE);
+        MoveWindow(b.find_next_btn, width - 84, find_y, 28, 28, TRUE);
+        MoveWindow(b.find_close_btn, width - 52, find_y, 28, 28, TRUE);
+    }
+
+    RECT view_area = {4, tabs_y + tabs_h + find_h, width - 4, height - status_h};
     SendMessageW(b.tab_ctrl, TCM_ADJUSTRECT, FALSE, reinterpret_cast<LPARAM>(&view_area));
     WinTab* tab = active_tab(b);
     if (tab) {
@@ -938,6 +1250,12 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
         case WM_APP_RELOAD_CHANGED:
             SetTimer(wnd, TIMER_RELOAD, 300, nullptr);
             return 0;
+        case WM_APP_CLOSE_TAB: {
+            WinTab* target = reinterpret_cast<WinTab*>(wparam);
+            int index = tab_index(b, target);
+            if (index >= 0) close_tab(b, index);
+            return 0;
+        }
         case WM_NOTIFY: {
             NMHDR* header = reinterpret_cast<NMHDR*>(lparam);
             if (header && header->idFrom == ID_TABS && header->code == TCN_SELCHANGE) {
@@ -952,6 +1270,10 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
             if (id == ID_URL && code == ID_URL_ENTER) {
                 load_url_text(b, to_utf8(get_window_text(b.url_entry)));
                 SetFocus(b.url_entry);
+                return 0;
+            }
+            if (id == ID_FIND_EDIT && code == EN_CHANGE) {
+                find_run(b, 0);
                 return 0;
             }
             if (id == ID_PRIVATE && code == BN_CLICKED) {
@@ -998,6 +1320,18 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
                 case ID_HISTORY:
                 case ID_ACC_HISTORY:
                     open_history_window(b);
+                    return 0;
+                case ID_ACC_FIND:
+                    show_find_ui(b, true);
+                    return 0;
+                case ID_FIND_NEXT:
+                    find_run(b, 1);
+                    return 0;
+                case ID_FIND_PREV:
+                    find_run(b, -1);
+                    return 0;
+                case ID_FIND_CLOSE:
+                    show_find_ui(b, false);
                     return 0;
                 case ID_ACC_URL:
                     SetFocus(b.url_entry);
@@ -1144,6 +1478,20 @@ int mustela_main(int argc, char** argv) {
     b.status_bar = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
         0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_STATUS)), GetModuleHandleW(nullptr), nullptr);
 
+    b.find_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | ES_AUTOHSCROLL | WS_TABSTOP, 8, 76, width - 240, 28, window,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_FIND_EDIT)), GetModuleHandleW(nullptr), nullptr);
+    b.find_count = CreateWindowExW(0, L"STATIC", L"", WS_CHILD, width - 224, 82, 104, 22, window,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_FIND_COUNT)), GetModuleHandleW(nullptr), nullptr);
+    b.find_prev_btn = CreateWindowExW(0, WC_BUTTONW, L"↑", WS_CHILD | BS_PUSHBUTTON,
+        width - 112, 76, 28, 28, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_FIND_PREV)), GetModuleHandleW(nullptr), nullptr);
+    b.find_next_btn = CreateWindowExW(0, WC_BUTTONW, L"↓", WS_CHILD | BS_PUSHBUTTON,
+        width - 80, 76, 28, 28, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_FIND_NEXT)), GetModuleHandleW(nullptr), nullptr);
+    b.find_close_btn = CreateWindowExW(0, WC_BUTTONW, L"×", WS_CHILD | BS_PUSHBUTTON,
+        width - 48, 76, 28, 28, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_FIND_CLOSE)), GetModuleHandleW(nullptr), nullptr);
+    SetWindowSubclass(b.find_edit, find_edit_subclass, URL_SUBCLASS_ID + 1, 0);
+    SendMessageW(b.find_edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Find in page"));
+
     SendMessageW(b.url_entry, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search or enter address"));
     if (b.privacy.default_private == TabPrivacy::Private) {
         SendMessageW(b.private_toggle, BM_SETCHECK, BST_CHECKED, 0);
@@ -1157,10 +1505,11 @@ int mustela_main(int argc, char** argv) {
         {FVIRTKEY, VK_F5, ID_ACC_RELOAD},
         {FVIRTKEY | FCONTROL | FSHIFT, VK_DELETE, ID_ACC_CLEAR_DATA},
         {FVIRTKEY | FCONTROL, 'H', ID_ACC_HISTORY},
+        {FVIRTKEY | FCONTROL, 'F', ID_ACC_FIND},
         {FVIRTKEY | FALT, VK_LEFT, ID_ACC_BACK},
         {FVIRTKEY | FALT, VK_RIGHT, ID_ACC_FORWARD}
     };
-    HACCEL accel = CreateAcceleratorTableW(accelerators, 9);
+    HACCEL accel = CreateAcceleratorTableW(accelerators, 10);
 
     b.watcher_thread = CreateThread(nullptr, 0, watcher_main, nullptr, 0, nullptr);
 
