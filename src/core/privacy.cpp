@@ -23,6 +23,8 @@ PrivacyPolicy privacy_from(const Settings& settings) {
     PrivacyPolicy policy;
     policy.private_tabs_available = settings.private_tabs_enabled;
     policy.history_enabled = settings.history_enabled;
+    policy.gpc = settings.gpc;
+    policy.blocklist = settings.blocklist;
     policy.default_private = (settings.private_tabs_enabled && settings.start_in_private)
         ? TabPrivacy::Private
         : TabPrivacy::Normal;
@@ -37,6 +39,12 @@ PrivacyPolicy privacy_from(const Settings& settings) {
     policy.fingerprint.block_remote_fonts = settings.fingerprint_fonts;
     policy.fingerprint.referrer = referrer_trim_from(settings.fingerprint_referrer);
     return policy;
+}
+
+const char* gpc_user_script() {
+    return "(function(){var d=Object.defineProperty;var g=function(){return true;};"
+        "try{d(Navigator.prototype,'globalPrivacyControl',{get:g,configurable:true});}catch(e){}"
+        "try{d(window.navigator,'globalPrivacyControl',{get:g,configurable:true});}catch(e){}})();";
 }
 
 SiteDecision resolve_site(const PrivacyPolicy& policy, const SiteRules& rules, const std::string& uri) {

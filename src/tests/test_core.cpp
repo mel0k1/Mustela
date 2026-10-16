@@ -5,13 +5,16 @@
 #include <string>
 
 #include "browsing_data.hpp"
+#include "blocklist.hpp"
 #include "config.hpp"
+#include "doh.hpp"
 #include "fingerprint.hpp"
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
 #include "perf.hpp"
 #include "permissions.hpp"
 #include "privacy.hpp"
+#include "session.hpp"
 #include "site_rules.hpp"
 #include "ui_text.hpp"
 #include "url.hpp"
@@ -88,6 +91,11 @@ void test_settings_roundtrip() {
     original.permissions_microphone = "deny";
     original.permissions_notifications = "ask";
     original.tls_strict = false;
+    original.session_restore = false;
+    original.gpc = false;
+    original.blocklist = false;
+    original.blocklist_file = "/tmp/trackers.list";
+    original.dns_over_https = "https://dns.example/dns-query";
 
     mustela::save_settings(path, original);
     mustela::Settings loaded = mustela::load_settings(path);
@@ -121,6 +129,11 @@ void test_settings_roundtrip() {
     CHECK_STR(loaded.permissions_microphone, "deny");
     CHECK_STR(loaded.permissions_notifications, "ask");
     CHECK(!loaded.tls_strict);
+    CHECK(!loaded.session_restore);
+    CHECK(!loaded.gpc);
+    CHECK(!loaded.blocklist);
+    CHECK_STR(loaded.blocklist_file, "/tmp/trackers.list");
+    CHECK_STR(loaded.dns_over_https, "https://dns.example/dns-query");
 
     mustela::Settings fallback = mustela::load_settings(path + "_missing");
     CHECK_STR(fallback.homepage, "https://example.org");
@@ -572,6 +585,222 @@ void test_ui_text() {
     CHECK_STR(mustela::sanitize_filename("abcdef", 4), "abcd");
 }
 
+void test_blocklist() {
+    mustela::Blocklist defaults;
+    CHECK(defaults.size() > 50);
+    CHECK(defaults.hit("doubleclick.net"));
+    CHECK(defaults.hit("ad.doubleclick.net"));
+    CHECK(defaults.hit("AD.DoubleClick.NET."));
+    CHECK(!defaults.hit("notdoubleclick.net"));
+    CHECK(!defaults.hit("doubleclick.net.evil.com"));
+    CHECK(!defaults.hit("example.org"));
+    CHECK_STR(mustela::normalize_host(" Example.COM. "), "example.com");
+    CHECK(mustela::host_matches_domain("a.b.example.com", "example.com"));
+    CHECK(!mustela::host_matches_domain("example.com", "a.b.example.com"));
+    CHECK(!mustela::host_matches_domain("", "example.com"));
+
+    mustela::Blocklist custom;
+    size_t base = custom.size();
+    custom.add("Example.Net");
+    custom.add("example.net");
+    CHECK(custom.size() == base + 1);
+    CHECK(custom.hit("www.example.net"));
+    CHECK(!custom.hit("example.org"));
+    custom.add("bad..host");
+    custom.add("-bad");
+    custom.add("not a domain!");
+    CHECK(custom.size() == base + 1);
+
+    std::string extra = write_temp("blocklist_extra.list",
+        "# comment\n  ads.example.net  \n\nBAD.HOST\nnot a domain!\n");
+    mustela::Blocklist loaded = mustela::default_blocklist(extra);
+    CHECK(loaded.hit("ads.example.net"));
+    CHECK(loaded.hit("bad.host"));
+    CHECK(!loaded.hit("example.net"));
+
+    std::string json = mustela::blocklist_rules_json({"Example.com", "bad host", "bad..host", ""});
+    CHECK_STR(json,
+        std::string("[{\"trigger\":{\"url-filter\":\".*\",\"if-domain\":[\"example.com\",\"*.example.com\"]},"
+            "\"action\":{\"type\":\"block\"}}]"));
+    CHECK_STR(mustela::blocklist_rules_json({}), "");
+}
+
+void test_doh_codec() {
+    std::vector<unsigned char> query = mustela::doh::build_query("example.com", 1);
+    static const unsigned char expected[] = {
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
+        0x00, 0x01, 0x00, 0x01
+    };
+    CHECK(query.size() == sizeof(expected));
+    bool same = query.size() == sizeof(expected);
+    for (size_t i = 0; same && i < query.size(); ++i) same = query[i] == expected[i];
+    CHECK(same);
+    CHECK(mustela::doh::build_query("", 1).empty());
+    CHECK(mustela::doh::build_query("a..b", 1).empty());
+    CHECK(mustela::doh::build_query(std::string(64, 'a'), 1).empty());
+
+    CHECK_STR(mustela::doh::encode_base64url({0x00, 0x01, 0x02}), "AAEC");
+    CHECK_STR(mustela::doh::encode_base64url({0xFB, 0xFF}), "-_8");
+    CHECK_STR(mustela::doh::encode_base64url({0x00}), "AA");
+    CHECK_STR(mustela::doh::encode_base64url({}), "");
+
+    std::string uri = mustela::doh::query_uri("https://dns.example/dns-query", "example.com");
+    CHECK(uri.rfind("https://dns.example/dns-query?dns=", 0) == 0);
+    std::string chained = mustela::doh::query_uri("https://dns.example/dns-query?cache=1", "example.com");
+    CHECK(chained.rfind("https://dns.example/dns-query?cache=1&dns=", 0) == 0);
+    CHECK_STR(mustela::doh::query_uri("", "example.com"), "");
+
+    std::vector<unsigned char> packet;
+    auto u16 = [&packet](unsigned short value) {
+        packet.push_back(static_cast<unsigned char>(value >> 8));
+        packet.push_back(static_cast<unsigned char>(value & 0xFF));
+    };
+    u16(0x1234);
+    u16(0x8180);
+    u16(1);
+    u16(1);
+    u16(0);
+    u16(0);
+    packet.push_back(7);
+    for (char c : std::string("example")) packet.push_back(static_cast<unsigned char>(c));
+    packet.push_back(3);
+    packet.push_back('c');
+    packet.push_back('o');
+    packet.push_back('m');
+    packet.push_back(0);
+    u16(1);
+    u16(1);
+    packet.push_back(0xC0);
+    packet.push_back(0x0C);
+    u16(1);
+    u16(1);
+    u16(0);
+    u16(300);
+    u16(4);
+    packet.push_back(93);
+    packet.push_back(184);
+    packet.push_back(216);
+    packet.push_back(34);
+
+    mustela::doh::Response response;
+    CHECK(mustela::doh::parse_response(packet.data(), packet.size(), response));
+    CHECK(response.rcode == mustela::doh::Rcode::NoError);
+    CHECK(response.answers.size() == 1);
+    CHECK_STR(response.answers[0].name, "example.com");
+    CHECK(response.answers[0].type == 1);
+    CHECK(response.answers[0].ttl == 300);
+    CHECK_STR(response.answers[0].data, "93.184.216.34");
+
+    std::vector<unsigned char> name_error = packet;
+    name_error[3] = 0x83;
+    CHECK(mustela::doh::parse_response(name_error.data(), name_error.size(), response));
+    CHECK(response.rcode == mustela::doh::Rcode::NameError);
+
+    std::vector<unsigned char> cname = packet;
+    size_t answer_type_offset = 12 + 13 + 4 + 2;
+    size_t answer_rdata_offset = answer_type_offset + 8 + 2;
+    cname[answer_type_offset] = 0;
+    cname[answer_type_offset + 1] = 5;
+    cname[answer_rdata_offset] = 0xC0;
+    cname[answer_rdata_offset + 1] = 0x0C;
+    CHECK(mustela::doh::parse_response(cname.data(), cname.size(), response));
+    CHECK_STR(response.answers[0].data, "example.com");
+
+    std::vector<unsigned char> ipv6 = packet;
+    ipv6[answer_type_offset] = 0;
+    ipv6[answer_type_offset + 1] = 28;
+    ipv6[answer_type_offset + 8] = 0;
+    ipv6[answer_type_offset + 9] = 16;
+    ipv6[answer_rdata_offset] = 0x20;
+    ipv6[answer_rdata_offset + 1] = 0x01;
+    ipv6[answer_rdata_offset + 2] = 0x0d;
+    ipv6[answer_rdata_offset + 3] = 0xb8;
+    for (int i = 0; i < 10; ++i) ipv6.push_back(0);
+    ipv6.push_back(0);
+    ipv6.push_back(1);
+    CHECK(mustela::doh::parse_response(ipv6.data(), ipv6.size(), response));
+    CHECK_STR(response.answers[0].data, "2001:db8::1");
+
+    CHECK(!mustela::doh::parse_response(packet.data(), 11, response));
+    CHECK(!mustela::doh::parse_response(packet.data(), 20, response));
+    CHECK(!mustela::doh::parse_response(nullptr, 0, response));
+
+    std::vector<unsigned char> loop;
+    auto u16v = [](std::vector<unsigned char>& out, unsigned short value) {
+        out.push_back(static_cast<unsigned char>(value >> 8));
+        out.push_back(static_cast<unsigned char>(value & 0xFF));
+    };
+    u16v(loop, 0);
+    u16v(loop, 0x8180);
+    u16v(loop, 0);
+    u16v(loop, 1);
+    u16v(loop, 0);
+    u16v(loop, 0);
+    loop.push_back(0xC0);
+    loop.push_back(0x0C);
+    u16v(loop, 1);
+    u16v(loop, 1);
+    u16v(loop, 0);
+    u16v(loop, 60);
+    u16v(loop, 0);
+    CHECK(!mustela::doh::parse_response(loop.data(), loop.size(), response));
+}
+
+void test_session_store() {
+    std::string path = temp_path("session.json");
+    mustela::SessionData data;
+    data.active = 1;
+    mustela::SessionTab first;
+    first.url = "https://example.org/page?a=1&b=2";
+    first.title = "Ex\"ample \\ \n\tтест";
+    first.back = {"https://example.org/", "https://example.org/about"};
+    first.forward = {"https://example.org/next"};
+    first.state = "AAEC+/==";
+    mustela::SessionTab second;
+    second.url = "https://mustela.example";
+    second.title = "Second";
+    data.tabs = {first, second};
+    CHECK(mustela::save_session(path, data));
+
+    mustela::SessionData loaded;
+    CHECK(mustela::load_session(path, loaded));
+    CHECK(loaded.active == 1);
+    CHECK(loaded.tabs.size() == 2);
+    CHECK_STR(loaded.tabs[0].url, first.url);
+    CHECK_STR(loaded.tabs[0].title, first.title);
+    CHECK_STR(loaded.tabs[0].state, first.state);
+    CHECK(loaded.tabs[0].back.size() == 2);
+    CHECK_STR(loaded.tabs[0].back[1], "https://example.org/about");
+    CHECK(loaded.tabs[0].forward.size() == 1);
+    CHECK_STR(loaded.tabs[1].title, "Second");
+
+    std::string hand = "{\"version\":1,\"active\":7,\"future\":true,\"tabs\":["
+        "{\"url\":\"https://a.example\",\"rank\":3,\"back\":[],\"title\":\"A\"},"
+        "{\"url\":\"https://b.example\"}]}";
+    std::string hand_path = write_temp("session_hand.json", hand);
+    mustela::SessionData parsed;
+    CHECK(mustela::load_session(hand_path, parsed));
+    CHECK(parsed.tabs.size() == 2);
+    CHECK(parsed.active == 1);
+    CHECK_STR(parsed.tabs[0].title, "A");
+    CHECK_STR(parsed.tabs[1].url, "https://b.example");
+
+    CHECK(!mustela::load_session(path + "_missing", parsed));
+    std::string broken = write_temp("session_broken.json", "{\"tabs\":[{\"url\":}");
+    CHECK(!mustela::load_session(broken, parsed));
+    std::string empty = write_temp("session_empty.json", "");
+    CHECK(!mustela::load_session(empty, parsed));
+
+    std::string empty_path = temp_path("session_empty_save.json");
+    mustela::SessionData empty_data;
+    CHECK(mustela::save_session(empty_path, empty_data));
+    mustela::SessionData empty_loaded;
+    CHECK(mustela::load_session(empty_path, empty_loaded));
+    CHECK(empty_loaded.tabs.empty());
+    CHECK(empty_loaded.active == 0);
+}
+
 }
 
 int main() {
@@ -589,6 +818,9 @@ int main() {
     test_ui_text();
     test_permissions();
     test_site_rules_permissions();
+    test_blocklist();
+    test_doh_codec();
+    test_session_store();
 
     if (failures > 0) {
         std::fprintf(stderr, "%d/%d checks failed\n", failures, checks);

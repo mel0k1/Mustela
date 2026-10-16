@@ -34,6 +34,11 @@ struct Settings {
     std::string permissions_microphone = "deny";
     std::string permissions_notifications = "deny";
     bool tls_strict = true;
+    bool session_restore = true;
+    bool gpc = true;
+    bool blocklist = true;
+    std::string blocklist_file;
+    std::string dns_over_https;
 };
 
 Settings load_settings(const std::string& path);

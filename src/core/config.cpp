@@ -154,6 +154,11 @@ Settings load_settings(const std::string& path) {
     settings.permissions_microphone = permission_value(pairs, "permissions.microphone", settings.permissions_microphone);
     settings.permissions_notifications = permission_value(pairs, "permissions.notifications", settings.permissions_notifications);
     apply(pairs, "security.tls_strict", settings.tls_strict);
+    apply(pairs, "shell.session_restore", settings.session_restore);
+    apply(pairs, "privacy.gpc", settings.gpc);
+    apply(pairs, "privacy.blocklist", settings.blocklist);
+    apply(pairs, "privacy.blocklist_file", settings.blocklist_file);
+    apply(pairs, "privacy.dns_over_https", settings.dns_over_https);
     return settings;
 }
 
@@ -167,6 +172,7 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "window_width = " << settings.window_width << "\n";
     out << "window_height = " << settings.window_height << "\n";
     out << "zoom = " << clamp_zoom(settings.zoom_default) << "\n";
+    out << "session_restore = " << (settings.session_restore ? "true" : "false") << "\n";
     out << "\n[privacy]\n";
     out << "private_tabs_enabled = " << (settings.private_tabs_enabled ? "true" : "false") << "\n";
     out << "start_in_private = " << (settings.start_in_private ? "true" : "false") << "\n";
@@ -181,6 +187,10 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "fingerprint_canvas = " << (settings.fingerprint_canvas ? "true" : "false") << "\n";
     out << "fingerprint_fonts = " << (settings.fingerprint_fonts ? "true" : "false") << "\n";
     out << "fingerprint_referrer = \"" << settings.fingerprint_referrer << "\"\n";
+    out << "gpc = " << (settings.gpc ? "true" : "false") << "\n";
+    out << "blocklist = " << (settings.blocklist ? "true" : "false") << "\n";
+    out << "blocklist_file = \"" << settings.blocklist_file << "\"\n";
+    out << "dns_over_https = \"" << settings.dns_over_https << "\"\n";
     out << "\n[perf]\n";
     out << "process_model = \"" << settings.process_model << "\"\n";
     out << "startup_budget_ms = " << settings.startup_budget_ms << "\n";

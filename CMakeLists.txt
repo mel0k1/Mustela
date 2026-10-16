@@ -29,7 +29,10 @@ add_library(mustela_core STATIC
     src/core/perf.cpp
     src/core/permissions.cpp
     src/core/ui_text.cpp
-    src/core/url.cpp)
+    src/core/url.cpp
+    src/core/blocklist.cpp
+    src/core/doh.cpp
+    src/core/session.cpp)
 target_include_directories(mustela_core PUBLIC src src/core)
 target_link_libraries(mustela_core PUBLIC mustela_warnings)
 

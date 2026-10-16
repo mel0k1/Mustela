@@ -31,6 +31,8 @@ struct Hardening {
 struct PrivacyPolicy {
     bool private_tabs_available = true;
     bool history_enabled = true;
+    bool gpc = true;
+    bool blocklist = true;
     TabPrivacy default_private = TabPrivacy::Normal;
     CookiePolicy cookies = CookiePolicy::NoThirdParty;
     Hardening hardening;
@@ -49,6 +51,7 @@ struct PrivacyPolicy {
 CookiePolicy cookie_policy_from(const std::string& name);
 const char* cookie_policy_name(CookiePolicy policy);
 PrivacyPolicy privacy_from(const Settings& settings);
+const char* gpc_user_script();
 
 struct SiteDecision {
     bool javascript = true;
