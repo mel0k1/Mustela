@@ -155,6 +155,14 @@ Downloads land in the platform Downloads folder (or `downloads.dir`) under a nam
 - The status label in the toolbar shows the active policy: current tab mode, cookie policy, ITP and fingerprint state.
 - No telemetry exists anywhere in the codebase, and this bullet is enforced by review.
 
+## GPC, tracker blocklist and secure DNS (v0.10)
+
+Global Privacy Control is on by default (`privacy.gpc`). A document-start user script exposes `navigator.globalPrivacyControl` as a read-only `true` on every frame of both ports; on Linux a small web-process extension (`src/webext/gtk`) additionally appends `Sec-GPC: 1` to every outgoing request header, main frame and subresource alike. The WinCairo C API has no request-header surface, so Windows ships the JS property only — sites reading the signal get it everywhere, sites sniffing headers get it on GTK. The script follows hot-reload; the extension reads its flag at browser launch.
+
+The tracker blocklist (`privacy.blocklist`, on by default) ships ~60 well-known ad and analytics domains as data in the core (`blocklist.hpp`) and compiles them through the same content-filter machinery as the remote-font filter: `WebKitUserContentFilterStore` on GTK, `WKUserContentExtensionStore` on Windows. Matching is suffix-based — a rule for `doubleclick.net` covers every subdomain and never touches `notdoubleclick.net`. Loads from listed domains are blocked on all resource types, including top-level navigations: typing a tracker domain into the address bar shows a blocked page. `privacy.blocklist_file` accepts an extra list, one domain per line with `#` comments; malformed lines are ignored.
+
+Secure DNS ships as groundwork: the core carries an RFC 8484 DoH codec (`doh.hpp` — DNS query build, response parsing with name compression, A/AAAA/CNAME extraction, base64url framing) behind `privacy.dns_over_https`. Neither WebKitGTK nor the WinCairo C API exposes a resolver hook today, so no traffic flows through the setting yet; the codec is unit-tested and waiting for a transport, with a local proxy milestone as the natural place. Until then, encrypted DNS on the host is the platform resolver's job.
+
 ## Next steps
 
 Performance budgets, per-origin cookie wipe on Windows when the C API grows one, and the Kiwi browser driving this whole surface with a real UI — see the [roadmap](ROADMAP.md).

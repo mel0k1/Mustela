@@ -42,6 +42,7 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | shell.window_width | 1280 | window width, updated on exit |
 | shell.window_height | 800 | window height, updated on exit |
 | shell.zoom | 1.0 | default zoom for new tabs, 0.3–3.0 (Ctrl+plus/minus/0 changes the active tab) |
+| shell.session_restore | true | reopen the previous session's tabs on start (normal tabs only) |
 | downloads.dir | (empty) | download destination; empty means the platform Downloads folder |
 | downloads.mode | auto | `auto` saves without asking, `ask` opens a save dialog per download |
 | permissions.geolocation | deny | `deny`, `ask` or `allow` for location requests |
@@ -62,6 +63,10 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | privacy.fingerprint_canvas | false | canvas readbacks (`toDataURL`, `toBlob`, `getImageData`, `readPixels`) return blank data |
 | privacy.fingerprint_fonts | false | block every remote font download |
 | privacy.fingerprint_referrer | same-origin | `off`, `same-origin` (no cross-origin Referer) or `no-referrer` |
+| privacy.gpc | true | expose `navigator.globalPrivacyControl` and send `Sec-GPC: 1` on every request (GTK; Windows ships the JS side) |
+| privacy.blocklist | true | block ~60 built-in tracker/ad domains through a compiled content filter |
+| privacy.blocklist_file | (empty) | optional file with extra domains, one per line, `#` comments allowed |
+| privacy.dns_over_https | (empty) | DoH resolver URL (RFC 8484); recorded for future runtime wiring — no WebKit flavor exposes a resolver hook yet |
 | perf.process_model | per-view | `per-view` (one web process per view, upstream default) or `shared` (a single shared web process — lower memory, weaker site isolation, applies at startup) |
 | perf.startup_budget_ms | 0 | startup budget; `0` disables the check, otherwise the shell flashes `startup Nms over budget` when the time to first mapped window exceeds it |
 | perf.memory_ceiling_mb | 0 | process-tree RSS ceiling; `0` disables monitoring, otherwise the status bar shows `mem N MB` while the ceiling is exceeded |
@@ -98,6 +103,7 @@ A rule for a domain covers its subdomains (`example.org` matches `www.example.or
 | Ctrl+L | focus the address bar |
 | Ctrl+H | history window |
 | Ctrl+F | find in page (Enter / Shift+Enter — next / previous match, Escape closes) |
+| F11 | toggle window fullscreen (HTML5 element fullscreen follows on GTK) |
 | Ctrl+plus / Ctrl+minus / Ctrl+0 | zoom in / out / reset (30%–300%) |
 | Ctrl+Shift+Del | clear browsing data (cookies, cache, storage, IndexedDB) |
 | Ctrl+Shift+S | site rules window |

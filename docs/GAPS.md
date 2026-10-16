@@ -8,15 +8,15 @@ Every source file was re-read against two questions: does the engine expose this
 
 ## What exists today
 
-- Core: TOML settings, privacy policy with per-site rules, permission policy with per-site grants, fingerprint budget, history, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log), `ui_text` sanitization for dialog text, find queries and download names. 245-check test suite.
-- GTK shell: tabs, URL bar with search fallback, private toggle, history window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model, popups as tabs, native JS dialogs, find-in-page, status link preview, downloads, zoom, permission prompts, TLS certificate prompt, HTTP auth prompt, crash recovery.
-- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies), popups via `WKPageUIClient` V6, dialog listeners, `WKPageFindClient` find bar, link preview, downloads, zoom, permission prompts, HTTP auth prompt, crash recovery.
+- Core: TOML settings, privacy policy with per-site rules, permission policy with per-site grants, fingerprint budget, tracking blocklist, DoH wire codec, session store, history, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log), `ui_text` sanitization for dialog text, find queries and download names. 322-check test suite.
+- GTK shell: tabs, URL bar with search fallback, private toggle, history window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model, popups as tabs, native JS dialogs, find-in-page, status link preview, downloads, zoom, permission prompts, TLS certificate prompt, HTTP auth prompt, crash recovery, Mustela context menu, fullscreen (F11 + HTML5), session restore, GPC script, tracker blocklist filter.
+- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies), popups via `WKPageUIClient` V6, dialog listeners, `WKPageFindClient` find bar, link preview, downloads, zoom, permission prompts, HTTP auth prompt, crash recovery, Mustela context menu, F11 fullscreen, session restore, GPC script, tracker blocklist filter.
 - Bench: `mustela-bench` (GTK, runs in CI under xvfb) and `mustela-bench-win` (WinCairo, hidden host window; compiled in CI, executed on demand).
-- CI: three green tracks — Linux full build + tests + bench, Windows core tests, Windows shell and bench compile against 86 pinned upstream headers.
+- CI: three green tracks — Linux full build + tests + bench, Windows core tests, Windows shell and bench compile against 88 pinned upstream headers.
 
 ## Browsing platform gaps (priority 1)
 
-These are the capabilities a browser-shaped consumer (Kiwi) will need first. Popups, JS dialogs, find-in-page, status link preview, downloads, zoom, permissions, certificate/auth and crash recovery shipped in M5; the rest are absent today.
+These are the capabilities a browser-shaped consumer (Kiwi) will need first. Popups, JS dialogs, find-in-page, status link preview, downloads, zoom, permissions, certificate/auth and crash recovery shipped in M5; fullscreen, the context menu and session restore shipped in M6; the rest are absent today.
 
 | Gap | Unused API surface | Notes |
 |---|---|---|
@@ -25,21 +25,21 @@ These are the capabilities a browser-shaped consumer (Kiwi) will need first. Pop
 | Downloads | ~~GTK `download-started`; Win `WKContextDownloadClient`~~ — done in M5 | Destination from `downloads.dir`, ask mode, status-bar progress |
 | Find in page | ~~GTK `WebKitFindController`; Win `WKPageFindClient`~~ — done in M5 | Ctrl+F bar, next/previous, match counts, wrap-around |
 | Zoom | ~~GTK `webkit_web_view_set_zoom_level`; Win `WKPageSetScaleFactor`~~ — done in M5 | Ctrl+plus/minus/0, `shell.zoom` default |
-| Fullscreen | GTK `run-as-modal`; Win `WKPageFullScreenClient` | HTML5 fullscreen requests fail silently |
-| Context menu | GTK `context-menu` signal; Win `WKPageContextMenuClient` | Default menus appear (GTK) or nothing (Win); no Mustela items (open in private tab, copy link) |
+| Fullscreen | ~~GTK `enter-fullscreen`/`leave-fullscreen`; Win F11 window fullscreen~~ — done in M6 | HTML5 element fullscreen works on GTK; the pinned WinCairo C API exposes no production fullscreen client, so element requests stay GTK-only |
+| Context menu | ~~GTK `context-menu` signal; Win `WKPageContextMenuClient` V2~~ — done in M6 | Mustela-built menus on both ports: navigation, link/image/media sections by hit-test, editing actions |
 | Permissions | ~~GTK `permission-request`; Win geolocation/usermedia in `WKPageUIClient` V6~~ — done in M5 | Global `permissions.*` choices + per-site `permissions` rule; GTK adds notifications; Win notifications stay auto-denied (no C API decision call) |
 | Certificate and HTTP auth errors | ~~GTK `accept-certificate` / `authenticate`; Win `didReceiveAuthenticationChallenge`~~ — done in M5 | GTK: allow-once cert prompt + credential prompt; Win: credential prompt, server-trust auto-rejected (C API has no cert acceptance) |
 | Web process crash | ~~GTK `web-process-terminated`; Win `webProcessDidTerminate`~~ — done in M5 | Two guarded auto-reloads, reason in the status bar |
-| Session restore | (core) | Tabs are not persisted across restarts; no session file format in the core |
+| Session restore | ~~(core) session file + GTK `WebKitWebViewSessionState` + Win back/forward URLs~~ — done in M6 | Tabs reopen after a restart; GTK restores full back/forward history, Windows restores tab URLs (no C API session-state restore); private tabs never saved |
 | Status link preview | ~~GTK `mouse-target-changed`; Win `mouseDidMoveOverElement`/`setStatusText`~~ — done in M5 | Hover URL in the status bar on both ports |
 
 ## Privacy engine gaps (priority 2)
 
 The privacy core is the product's identity; these are the next honest wins.
 
-- Global Privacy Control. Neither port sends a `Sec-GPC` header nor exposes `navigator.globalPrivacyControl`. WebKitGTK allows request headers per context; the C API allows custom user scripts for the JS side. A `privacy.gpc` switch is cheap and visible. (core policy + both ports)
-- Tracking-domain blocklist. Both ports already run compiled content filters (fonts on GTK, `WKUserContentExtensionStore` on Win). Shipping a privacy blocklist (tracker domains, fingerprinting endpoints) as data in the core, compiled per profile, reuses that machinery end to end. (core data + both ports)
-- DNS-over-HTTPS. `dns_prefetching` is handled, but there is no secure-DNS setting exposed on either port. (port)
+- Global Privacy Control. ~~Neither port sends a `Sec-GPC` header nor exposes `navigator.globalPrivacyControl`.~~ — done in M6: `privacy.gpc` (on by default) injects the JS property through a document-start user script on both ports, and a GTK web-process extension (`src/webext/gtk`) adds `Sec-GPC: 1` to every request; the WinCairo C API has no request-header surface, so Windows ships the JS side only.
+- Tracking-domain blocklist. ~~Both ports already run compiled content filters...~~ — done in M6: `blocklist.hpp` ships ~60 built-in tracker domains plus an optional `privacy.blocklist_file`, compiled per profile through the existing content-filter machinery on both ports.
+- DNS-over-HTTPS. The core now carries an RFC 8484 codec (`doh.hpp`: query build, compressed response parse, base64url `query_uri`) and the `privacy.dns_over_https` setting, but neither WebKitGTK nor the WinCairo C API exposes a resolver hook — runtime wiring is deferred to a proxy milestone. (core groundwork done, port wiring blocked upstream)
 - Proxy. No proxy settings surface despite both WebKit flavors supporting one. (port)
 - Public suffix awareness in `SiteRules`. `host_from_uri` does plain suffix matching: a rule for `example.org` correctly covers `www.example.org`, but a rule for a registry suffix (e.g. `co.uk`) would over-match. The core needs a bundled public-suffix list or a conservative "no registry-suffix rules" guard. (core)
 - Per-origin cookie wipe parity. GTK wipes cookies for a denied origin; the WinCairo C API has no per-origin removal, so Windows denial rides the global accept policy. Recheck upstream: if `WKWebsiteDataStoreRemoveData` grows origin filtering, port it. (port, upstream-dependent)
@@ -89,6 +89,12 @@ Leftovers from M4 plus what the bench variant opened up.
 | TLS certificate prompt | yes (allow once) | no (C API limit; auto-reject) |
 | HTTP auth prompt | yes | yes |
 | Web process crash recovery | yes | yes |
+| Fullscreen (F11) | yes | yes |
+| HTML5 element fullscreen | yes | no (C API limit; GTK signals only) |
+| Mustela context menu | yes | yes |
+| Session restore | yes (full history) | yes (tab URLs) |
+| GPC (Sec-GPC header + JS) | yes (web extension) | JS only (no C API header surface) |
+| Tracker blocklist | yes | yes |
 | Bench | GTK, runs in CI | WinCairo, compile-checked in CI |
 
 ## Build and CI gaps
@@ -101,6 +107,6 @@ Leftovers from M4 plus what the bench variant opened up.
 ## Suggested order
 
 1. M5 — browsing platform basics: shipped in full — popups, JS dialogs, find-in-page, link preview, downloads, zoom, permission policy with per-site memory, certificate/auth surface, crash recovery.
-2. M6 — privacy deepening: GPC, tracking-domain blocklist, secure DNS, public-suffix guard in site rules, settings load report.
+2. M6 — privacy deepening: shipped — GPC (JS both ports, Sec-GPC header on GTK via a web extension), tracking-domain blocklist compiled into content filters on both ports, DoH wire codec + setting in the core (runtime resolver hook blocked on upstream APIs), fullscreen, Mustela context menus and session restore on both ports; leftovers: public-suffix guard in site rules, settings load report.
 3. K1 — Kiwi consumes the declared public core surface (profiles, per-site policy UI) while the shell harness keeps parity work behind it.
-4. Ongoing: release/packaging job as soon as Windows runtime story settles.
+4. Ongoing: release/packaging job as soon as Windows runtime story settles; a local-proxy milestone would close secure-DNS wiring, the proxy gap and stronger request-level blocking at once.

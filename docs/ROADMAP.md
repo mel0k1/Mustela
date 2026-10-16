@@ -84,6 +84,16 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 - Web process crash recovery on both ports: GTK `web-process-terminated`, Windows `webProcessDidTerminate`; up to two automatic reloads per tab with a crash-loop guard, status message with the reason, manual Ctrl+R afterwards; the counter resets on a successful load. (done)
 - Known gaps kept for later: HTML5 fullscreen, context menu, session restore (see [GAPS.md](GAPS.md)).
 
+## M6 — Privacy deepening and browsing completion (done)
+
+- Global Privacy Control on both ports: `privacy.gpc` (on by default) injects a document-start user script exposing `navigator.globalPrivacyControl`, and a GTK web-process extension (`src/webext/gtk`) adds the `Sec-GPC: 1` header to every request; the WinCairo C API cannot mutate request headers, so Windows ships the JS surface only. (done)
+- Tracking-domain blocklist in the core (`blocklist.hpp`): ~60 built-in ad/tracker domains plus an optional `privacy.blocklist_file`, compiled per profile into content rules on both ports (GTK `WebKitUserContentFilterStore`, Windows `WKUserContentExtensionStore`) and enforced through the same user-content controllers as the fingerprint filters; suffix matching, domain validation and rule-set building are unit-tested. (done)
+- Secure DNS groundwork in the core (`doh.hpp`): RFC 8484 wire codec — query build, response parse with name compression, A/AAAA/CNAME answers, base64url framing (`query_uri`) — plus the `privacy.dns_over_https` setting; neither WebKit flavor exposes a DoH resolver hook through its public API, so runtime wiring waits for a proxy milestone and the gap stays tracked in [GAPS.md](GAPS.md). (done, runtime deferred)
+- Context menu on both ports: GTK `context-menu` handler rebuilds the menu from curated stock actions (navigation, link/image/media sections, editing actions by hit-test); Windows `WKPageContextMenuClient` V2 builds the same menu from `WKContextMenuItem` stock tags with the same hit-test sections. (done)
+- Fullscreen on both ports: F11 toggles window fullscreen (GTK `gtk_window_fullscreen`, Windows borderless-on-monitor with placement restore); HTML5 element fullscreen wires through GTK `enter-fullscreen`/`leave-fullscreen` — the pinned WinCairo C API exposes no production fullscreen client, so element requests stay GTK-only. (done)
+- Session restore in the core (`session.hpp`): JSON session file with tabs (url, title, history lists, opaque per-port state) and the active index; GTK persists `WebKitWebViewSessionState` blobs and restores full back/forward history per tab, Windows restores tab URLs (the C API has no session-state restore); private tabs are never saved, `shell.session_restore` switches the feature. (done)
+- Known gaps kept: public-suffix guard in `SiteRules` and a settings load report (M6 leftovers), per-origin cookie wipe and disk cache clear on Windows (upstream-dependent), secure-DNS runtime hook (blocked on upstream APIs).
+
 ## K1 — Kiwi browser
 
 - The product browser lives in the separate [Kiwi](https://github.com/mel0k1/Kiwi) repository; mustela-shell stays the engine's test harness.
