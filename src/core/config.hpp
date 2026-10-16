@@ -39,6 +39,10 @@ struct Settings {
     bool blocklist = true;
     std::string blocklist_file;
     std::string dns_over_https;
+    std::string proxy_mode = "off";
+    std::string proxy_upstream;
+    std::string proxy_user;
+    std::string proxy_password;
 };
 
 Settings load_settings(const std::string& path);

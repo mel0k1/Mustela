@@ -1,8 +1,22 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+#endif
 
 #include "browsing_data.hpp"
 #include "blocklist.hpp"
@@ -14,6 +28,7 @@
 #include "perf.hpp"
 #include "permissions.hpp"
 #include "privacy.hpp"
+#include "proxy_server.hpp"
 #include "session.hpp"
 #include "site_rules.hpp"
 #include "ui_text.hpp"
@@ -803,6 +818,440 @@ void test_session_store() {
 
 }
 
+using namespace mustela;
+
+void test_proxy_settings_keys() {
+    std::string path = write_temp("proxy_settings.toml",
+        "[proxy]\n"
+        "mode = \"local\"\n"
+        "upstream = \"http://gw.example:8080\"\n"
+        "user = \"u\"\n"
+        "password = \"p\"\n");
+    Settings settings = load_settings(path);
+    CHECK_STR(settings.proxy_mode, "local");
+    CHECK_STR(settings.proxy_upstream, "http://gw.example:8080");
+    CHECK_STR(settings.proxy_user, "u");
+    CHECK_STR(settings.proxy_password, "p");
+    std::string bad = write_temp("proxy_settings_bad.toml",
+        "[proxy]\n"
+        "mode = \"bogus\"\n");
+    Settings bad_settings = load_settings(bad);
+    CHECK_STR(bad_settings.proxy_mode, "off");
+    std::string saved = write_temp("proxy_settings_saved.toml", "");
+    save_settings(saved, settings);
+    Settings roundtrip = load_settings(saved);
+    CHECK_STR(roundtrip.proxy_mode, "local");
+    CHECK_STR(roundtrip.proxy_upstream, "http://gw.example:8080");
+    CHECK_STR(roundtrip.proxy_user, "u");
+    CHECK_STR(roundtrip.proxy_password, "p");
+}
+
+void test_proxy_urls() {
+    ProxyEndpoint ep;
+    CHECK(parse_proxy_url("http://127.0.0.1:3128", ep));
+    CHECK_STR(ep.host, "127.0.0.1");
+    CHECK(ep.port == 3128);
+    CHECK(ep.user.empty() && ep.password.empty());
+    CHECK(parse_proxy_url("http://user:secret@gw.example:8080", ep));
+    CHECK_STR(ep.user, "user");
+    CHECK_STR(ep.password, "secret");
+    CHECK(ep.port == 8080);
+    CHECK(parse_proxy_url("http://gw.example", ep));
+    CHECK(ep.port == 80);
+    CHECK(!parse_proxy_url("https://gw.example:443", ep));
+    CHECK(!parse_proxy_url("gw.example:8080", ep));
+    CHECK(!parse_proxy_url("http://", ep));
+    ProxyEndpoint made;
+    made.host = "127.0.0.1";
+    made.port = 9052;
+    CHECK_STR(proxy_url_from(made), "http://127.0.0.1:9052");
+    made.user = "u";
+    made.password = "p";
+    CHECK_STR(proxy_url_from(made), "http://u:p@127.0.0.1:9052");
+    CHECK(host_is_ip_literal("127.0.0.1"));
+    CHECK(host_is_ip_literal("[::1]"));
+    CHECK(!host_is_ip_literal("ok.example"));
+    CHECK(!host_is_ip_literal(""));
+}
+
+#ifdef _WIN32
+using TestSocket = SOCKET;
+constexpr TestSocket kTestInvalidSocket = INVALID_SOCKET;
+
+void test_close_socket(TestSocket handle) {
+    if (handle != kTestInvalidSocket) closesocket(handle);
+}
+#else
+using TestSocket = int;
+constexpr TestSocket kTestInvalidSocket = -1;
+
+void test_close_socket(TestSocket handle) {
+    if (handle != kTestInvalidSocket) {
+        shutdown(handle, SHUT_RDWR);
+        close(handle);
+    }
+}
+#endif
+
+void test_sockets_init() {
+#ifdef _WIN32
+    static bool done = false;
+    if (!done) {
+        WSADATA data;
+        WSAStartup(MAKEWORD(2, 2), &data);
+        done = true;
+    }
+#endif
+}
+
+TestSocket test_listen(int& port) {
+    TestSocket fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == kTestInvalidSocket) return kTestInvalidSocket;
+    sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    if (bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+        listen(fd, 8) != 0) {
+        test_close_socket(fd);
+        return kTestInvalidSocket;
+    }
+    socklen_t length = sizeof(address);
+    if (getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+        test_close_socket(fd);
+        return kTestInvalidSocket;
+    }
+    port = ntohs(address.sin_port);
+    return fd;
+}
+
+TestSocket test_connect(int port) {
+    TestSocket fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == kTestInvalidSocket) return kTestInvalidSocket;
+    timeval timeout;
+    timeout.tv_sec = 10;
+    timeout.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(static_cast<unsigned short>(port));
+    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        test_close_socket(fd);
+        return kTestInvalidSocket;
+    }
+    return fd;
+}
+
+bool test_send(TestSocket handle, const std::string& text) {
+    size_t sent = 0;
+    while (sent < text.size()) {
+        int written = static_cast<int>(send(handle, text.data() + sent,
+            static_cast<int>(text.size() - sent), 0));
+        if (written <= 0) return false;
+        sent += static_cast<size_t>(written);
+    }
+    return true;
+}
+
+std::string test_recv_until(TestSocket handle, const std::string& marker) {
+    std::string out;
+    char buffer[2048];
+    while (out.find(marker) == std::string::npos) {
+        int got = static_cast<int>(recv(handle, buffer, static_cast<int>(sizeof(buffer)), 0));
+        if (got <= 0) break;
+        out.append(buffer, buffer + got);
+    }
+    return out;
+}
+
+std::string test_recv_all(TestSocket handle) {
+    std::string out;
+    char buffer[4096];
+    for (;;) {
+        int got = static_cast<int>(recv(handle, buffer, static_cast<int>(sizeof(buffer)), 0));
+        if (got <= 0) break;
+        out.append(buffer, buffer + got);
+    }
+    return out;
+}
+
+void test_relay(TestSocket a, TestSocket b) {
+    char buffer[4096];
+    for (;;) {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(a, &readfds);
+        FD_SET(b, &readfds);
+        timeval timeout;
+        timeout.tv_sec = 10;
+        timeout.tv_usec = 0;
+#ifdef _WIN32
+        int ready = select(0, &readfds, nullptr, nullptr, &timeout);
+#else
+        int ready = select(std::max(a, b) + 1, &readfds, nullptr, nullptr, &timeout);
+#endif
+        if (ready <= 0) break;
+        bool alive = true;
+        if (FD_ISSET(a, &readfds)) {
+            int got = static_cast<int>(recv(a, buffer, static_cast<int>(sizeof(buffer)), 0));
+            if (got <= 0 || !test_send(b, std::string(buffer, buffer + got))) alive = false;
+        }
+        if (alive && FD_ISSET(b, &readfds)) {
+            int got = static_cast<int>(recv(b, buffer, static_cast<int>(sizeof(buffer)), 0));
+            if (got <= 0 || !test_send(a, std::string(buffer, buffer + got))) alive = false;
+        }
+        if (!alive) break;
+    }
+    test_close_socket(a);
+    test_close_socket(b);
+}
+
+struct StubOrigin {
+    TestSocket listener = kTestInvalidSocket;
+    int port = 0;
+    std::thread worker;
+    std::string reply;
+    bool raw = false;
+
+    bool start(const std::string& reply_text, bool raw_mode) {
+        test_sockets_init();
+        reply = reply_text;
+        raw = raw_mode;
+        listener = test_listen(port);
+        if (listener == kTestInvalidSocket) return false;
+        TestSocket handle = listener;
+        worker = std::thread([this, handle]() { run(handle); });
+        return true;
+    }
+
+    void run(TestSocket handle) {
+        for (;;) {
+            TestSocket client = accept(handle, nullptr, nullptr);
+            if (client == kTestInvalidSocket) break;
+            if (raw) {
+                char buffer[64];
+                recv(client, buffer, static_cast<int>(sizeof(buffer)), 0);
+                test_send(client, reply);
+            } else {
+                test_recv_until(client, "\r\n\r\n");
+                test_send(client, reply);
+            }
+            test_close_socket(client);
+        }
+    }
+
+    void stop() {
+        if (listener != kTestInvalidSocket) {
+            test_close_socket(listener);
+            listener = kTestInvalidSocket;
+        }
+        if (worker.joinable()) worker.join();
+    }
+};
+
+struct StubUpstream {
+    TestSocket listener = kTestInvalidSocket;
+    int port = 0;
+    std::thread worker;
+    int tunnel_origin_port = 0;
+
+    bool start(int tunnel_port) {
+        test_sockets_init();
+        tunnel_origin_port = tunnel_port;
+        listener = test_listen(port);
+        if (listener == kTestInvalidSocket) return false;
+        TestSocket handle = listener;
+        worker = std::thread([this, handle]() { run(handle); });
+        return true;
+    }
+
+    void run(TestSocket handle) {
+        for (;;) {
+            TestSocket client = accept(handle, nullptr, nullptr);
+            if (client == kTestInvalidSocket) break;
+            std::string request = test_recv_until(client, "\r\n\r\n");
+            if (request.rfind("CONNECT", 0) == 0) {
+                test_send(client, "HTTP/1.1 200 Connection established\r\n\r\n");
+                TestSocket origin = test_connect(tunnel_origin_port);
+                if (origin != kTestInvalidSocket) {
+                    test_relay(client, origin);
+                    continue;
+                }
+            } else {
+                test_send(client, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nup");
+            }
+            test_close_socket(client);
+        }
+    }
+
+    void stop() {
+        if (listener != kTestInvalidSocket) {
+            test_close_socket(listener);
+            listener = kTestInvalidSocket;
+        }
+        if (worker.joinable()) worker.join();
+    }
+};
+
+std::vector<unsigned char> make_a_response(const std::vector<unsigned char>& query, const unsigned char ip[4],
+    unsigned ttl, unsigned char rcode) {
+    std::vector<unsigned char> out = query;
+    out[2] |= 0x80;
+    out[3] = static_cast<unsigned char>((out[3] & 0x70) | 0x80 | (rcode & 0x0F));
+    out[6] = 0;
+    out[7] = rcode == 0 ? 1 : 0;
+    out.push_back(0xC0);
+    out.push_back(0x0C);
+    out.push_back(0);
+    out.push_back(1);
+    out.push_back(0);
+    out.push_back(1);
+    out.push_back(static_cast<unsigned char>((ttl >> 24) & 0xFF));
+    out.push_back(static_cast<unsigned char>((ttl >> 16) & 0xFF));
+    out.push_back(static_cast<unsigned char>((ttl >> 8) & 0xFF));
+    out.push_back(static_cast<unsigned char>(ttl & 0xFF));
+    out.push_back(0);
+    out.push_back(4);
+    for (int i = 0; i < 4; ++i) out.push_back(ip[i]);
+    return out;
+}
+
+void test_doh_resolver() {
+    int calls = 0;
+    bool fail_transport = false;
+    const unsigned char ip[4] = {93, 184, 216, 34};
+    DohTransport transport = [&](const std::string&, const std::vector<unsigned char>& query,
+        std::vector<unsigned char>& answer) {
+        ++calls;
+        if (fail_transport) return false;
+        answer = make_a_response(query, ip, 120, 0);
+        return true;
+    };
+    DohResolver resolver(transport, "https://doh.example/dns-query");
+    CHECK_STR(resolver.resolve("ok.example"), "93.184.216.34");
+    CHECK_STR(resolver.resolve("ok.example"), "93.184.216.34");
+    CHECK(calls == 1);
+    fail_transport = true;
+    CHECK_STR(resolver.resolve("fresh.example"), "");
+    fail_transport = false;
+    CHECK_STR(resolver.resolve("127.0.0.1"), "");
+    CHECK(calls == 2);
+    DohTransport nxdomain = [&](const std::string&, const std::vector<unsigned char>& query,
+        std::vector<unsigned char>& answer) {
+        answer = make_a_response(query, ip, 120, 3);
+        return true;
+    };
+    DohResolver strict(nxdomain, "https://doh.example/dns-query");
+    CHECK_STR(strict.resolve("missing.example"), "");
+}
+
+void test_proxy_server_loopback() {
+    test_sockets_init();
+    StubOrigin http_origin;
+    CHECK(http_origin.start("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", false));
+    StubOrigin raw_origin;
+    CHECK(raw_origin.start("pong", true));
+    Blocklist list;
+    list.add("tracker.example");
+    const unsigned char ip[4] = {127, 0, 0, 1};
+    DohTransport transport = [&](const std::string&, const std::vector<unsigned char>& query,
+        std::vector<unsigned char>& answer) {
+        answer = make_a_response(query, ip, 60, 0);
+        return true;
+    };
+
+    ProxyConfig config;
+    config.resolve_via_doh = true;
+    config.doh_url = "https://doh.example/dns-query";
+    ProxyServer proxy;
+    CHECK(proxy.start(config, list, transport));
+    int port = proxy.port();
+    CHECK(port > 0);
+
+    TestSocket client = test_connect(port);
+    CHECK(client != kTestInvalidSocket);
+    CHECK(test_send(client, "CONNECT tracker.example:443 HTTP/1.1\r\nHost: tracker.example:443\r\n\r\n"));
+    std::string reply = test_recv_until(client, "\r\n\r\n");
+    CHECK(reply.rfind("HTTP/1.1 403", 0) == 0);
+    test_close_socket(client);
+
+    client = test_connect(port);
+    CHECK(test_send(client, "CONNECT sub.tracker.example:443 HTTP/1.1\r\nHost: sub.tracker.example:443\r\n\r\n"));
+    reply = test_recv_until(client, "\r\n\r\n");
+    CHECK(reply.rfind("HTTP/1.1 403", 0) == 0);
+    test_close_socket(client);
+
+    client = test_connect(port);
+    CHECK(test_send(client, "CONNECT raw.example:" + std::to_string(raw_origin.port) +
+        " HTTP/1.1\r\nHost: raw.example\r\n\r\n"));
+    reply = test_recv_until(client, "\r\n\r\n");
+    CHECK(reply.rfind("HTTP/1.1 200", 0) == 0);
+    CHECK(test_send(client, "ping"));
+    std::string tunneled = test_recv_all(client);
+    CHECK_STR(tunneled, "pong");
+    test_close_socket(client);
+
+    client = test_connect(port);
+    CHECK(test_send(client, "GET http://tracker.example/x HTTP/1.1\r\nHost: tracker.example\r\n\r\n"));
+    reply = test_recv_until(client, "\r\n\r\n");
+    CHECK(reply.rfind("HTTP/1.1 403", 0) == 0);
+    test_close_socket(client);
+
+    client = test_connect(port);
+    CHECK(test_send(client, "GET http://raw.example:" + std::to_string(http_origin.port) +
+        "/path HTTP/1.1\r\nHost: raw.example\r\n\r\n"));
+    reply = test_recv_all(client);
+    CHECK(reply.find("hello") != std::string::npos);
+    test_close_socket(client);
+
+    DohTransport failing = [](const std::string&, const std::vector<unsigned char>&,
+        std::vector<unsigned char>&) {
+        return false;
+    };
+    ProxyServer strict_proxy;
+    CHECK(strict_proxy.start(config, list, failing));
+    client = test_connect(strict_proxy.port());
+    CHECK(test_send(client, "CONNECT raw.example:443 HTTP/1.1\r\nHost: raw.example\r\n\r\n"));
+    reply = test_recv_until(client, "\r\n\r\n");
+    CHECK(reply.rfind("HTTP/1.1 502", 0) == 0);
+    test_close_socket(client);
+    strict_proxy.stop();
+
+    proxy.stop();
+    CHECK(proxy.port() == 0);
+
+    StubUpstream upstream;
+    CHECK(upstream.start(raw_origin.port));
+    ProxyConfig chained;
+    chained.has_upstream = true;
+    chained.upstream.host = "127.0.0.1";
+    chained.upstream.port = upstream.port;
+    ProxyServer chained_proxy;
+    CHECK(chained_proxy.start(chained, list, transport));
+    client = test_connect(chained_proxy.port());
+    CHECK(test_send(client, "CONNECT raw.example:" + std::to_string(raw_origin.port) +
+        " HTTP/1.1\r\nHost: raw.example\r\n\r\n"));
+    reply = test_recv_until(client, "\r\n\r\n");
+    CHECK(reply.rfind("HTTP/1.1 200", 0) == 0);
+    CHECK(test_send(client, "ping"));
+    tunneled = test_recv_all(client);
+    CHECK_STR(tunneled, "pong");
+    test_close_socket(client);
+
+    client = test_connect(chained_proxy.port());
+    CHECK(test_send(client, "GET http://raw.example:" + std::to_string(http_origin.port) +
+        "/path HTTP/1.1\r\nHost: raw.example\r\n\r\n"));
+    reply = test_recv_all(client);
+    CHECK(reply.find("up") != std::string::npos);
+    test_close_socket(client);
+    chained_proxy.stop();
+    upstream.stop();
+    http_origin.stop();
+    raw_origin.stop();
+}
+
 int main() {
     test_settings_roundtrip();
     test_settings_partial_file();
@@ -821,6 +1270,10 @@ int main() {
     test_blocklist();
     test_doh_codec();
     test_session_store();
+    test_proxy_settings_keys();
+    test_proxy_urls();
+    test_doh_resolver();
+    test_proxy_server_loopback();
 
     if (failures > 0) {
         std::fprintf(stderr, "%d/%d checks failed\n", failures, checks);

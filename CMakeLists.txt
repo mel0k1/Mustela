@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mustela
-    VERSION 0.10.0
+    VERSION 0.11.0
     DESCRIPTION "Privacy-first, cross-platform browser engine built on WebKit"
     LANGUAGES CXX)
 
@@ -32,9 +32,14 @@ add_library(mustela_core STATIC
     src/core/url.cpp
     src/core/blocklist.cpp
     src/core/doh.cpp
+    src/core/proxy_server.cpp
     src/core/session.cpp)
 target_include_directories(mustela_core PUBLIC src src/core)
 target_link_libraries(mustela_core PUBLIC mustela_warnings)
+
+if(WIN32)
+    target_link_libraries(mustela_core PUBLIC ws2_32)
+endif()
 
 if(MUSTELA_BUILD_TESTS)
     enable_testing()
@@ -57,7 +62,7 @@ if(MUSTELA_BUILD_SHELL)
             target_link_directories(mustela PRIVATE ${MUSTELA_WEBKIT_SDK}/lib)
             target_link_libraries(mustela PRIVATE
                 WebKit WebCore WTF JavaScriptCore PAL
-                user32 gdi32 comctl32 comdlg32 ole32 shell32 psapi)
+                user32 gdi32 comctl32 comdlg32 ole32 shell32 psapi winhttp)
             if(MUSTELA_BUILD_BENCH)
                 add_executable(mustela-bench-win src/bench/bench_win.cpp)
                 target_include_directories(mustela-bench-win PRIVATE ${MUSTELA_WEBKIT_SDK}/include)

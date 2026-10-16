@@ -119,6 +119,10 @@ void Blocklist::add(const std::string& domain) {
     domains_.insert(it, clean);
 }
 
+void Blocklist::clear() {
+    domains_.clear();
+}
+
 bool Blocklist::hit(const std::string& host) const {
     std::string clean = normalize_host(host);
     for (const std::string& domain : domains_) {

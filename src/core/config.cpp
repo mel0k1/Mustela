@@ -108,6 +108,15 @@ std::string permission_value(const std::map<std::string, std::string>& pairs, co
     return fallback;
 }
 
+std::string proxy_mode_value(const std::map<std::string, std::string>& pairs, const std::string& key,
+    const std::string& fallback) {
+    auto it = pairs.find(key);
+    if (it == pairs.end()) return fallback;
+    const std::string& value = it->second;
+    if (value == "off" || value == "local" || value == "upstream") return value;
+    return fallback;
+}
+
 std::string downloads_mode_value(const std::map<std::string, std::string>& pairs, const std::string& key,
     const std::string& fallback) {
     auto it = pairs.find(key);
@@ -159,6 +168,10 @@ Settings load_settings(const std::string& path) {
     apply(pairs, "privacy.blocklist", settings.blocklist);
     apply(pairs, "privacy.blocklist_file", settings.blocklist_file);
     apply(pairs, "privacy.dns_over_https", settings.dns_over_https);
+    settings.proxy_mode = proxy_mode_value(pairs, "proxy.mode", settings.proxy_mode);
+    apply(pairs, "proxy.upstream", settings.proxy_upstream);
+    apply(pairs, "proxy.user", settings.proxy_user);
+    apply(pairs, "proxy.password", settings.proxy_password);
     return settings;
 }
 
@@ -206,6 +219,11 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "notifications = \"" << settings.permissions_notifications << "\"\n";
     out << "\n[security]\n";
     out << "tls_strict = " << (settings.tls_strict ? "true" : "false") << "\n";
+    out << "\n[proxy]\n";
+    out << "mode = \"" << settings.proxy_mode << "\"\n";
+    out << "upstream = \"" << settings.proxy_upstream << "\"\n";
+    out << "user = \"" << settings.proxy_user << "\"\n";
+    out << "password = \"" << settings.proxy_password << "\"\n";
 }
 
 }
