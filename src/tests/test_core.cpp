@@ -12,6 +12,7 @@
 #include "perf.hpp"
 #include "privacy.hpp"
 #include "site_rules.hpp"
+#include "ui_text.hpp"
 #include "url.hpp"
 
 namespace {
@@ -439,6 +440,39 @@ void test_perf_module() {
     CHECK(timer.stop(5.0) < 0.0);
 }
 
+void test_ui_text() {
+    CHECK_STR(mustela::sanitize_dialog_text("hello"), "hello");
+    CHECK_STR(mustela::sanitize_dialog_text(""), "");
+    CHECK_STR(mustela::sanitize_dialog_text(std::string("a\x01" "b\x02" "c\x07" "d")), "abcd");
+    CHECK_STR(mustela::sanitize_dialog_text(std::string("a\x0B" "b\x0C" "c\x0E" "d\x1F" "e\x7F" "f")), "abcdef");
+    CHECK_STR(mustela::sanitize_dialog_text("line1\nline2"), "line1\nline2");
+    CHECK_STR(mustela::sanitize_dialog_text("tab\there"), "tab\there");
+    CHECK_STR(mustela::sanitize_dialog_text("win\r\nline"), "win\nline");
+    CHECK_STR(mustela::sanitize_dialog_text("mac\rold"), "mac\nold");
+
+    std::string cyrillic = "\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82";
+    std::string cut_dialog = mustela::sanitize_dialog_text(cyrillic, 7);
+    CHECK_STR(cut_dialog, std::string("\xD0\xBF\xD1\x80\xE2\x80\xA6"));
+    std::string cut_ascii = mustela::sanitize_dialog_text("abcdefghij", 5);
+    CHECK_STR(cut_ascii, "ab\xE2\x80\xA6");
+    CHECK_STR(mustela::sanitize_dialog_text("abcdefghij", 3), "\xE2\x80\xA6");
+
+    CHECK_STR(mustela::sanitize_find_query("one two"), "one two");
+    CHECK_STR(mustela::sanitize_find_query(std::string("one\ntwo\r\nthree\rfour")), "one two three four");
+    CHECK_STR(mustela::sanitize_find_query(std::string("a\x01" "b")), "ab");
+    std::string cut_query = mustela::sanitize_find_query(cyrillic, 7);
+    CHECK_STR(cut_query, std::string("\xD0\xBF\xD1\x80\xD0\xB8"));
+    bool valid_utf8 = true;
+    for (size_t i = 0; i < cut_query.size(); ++i) {
+        if ((static_cast<unsigned char>(cut_query[i]) & 0xC0) == 0x80) continue;
+        unsigned char lead = static_cast<unsigned char>(cut_query[i]);
+        size_t need = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+        if (i + need > cut_query.size()) valid_utf8 = false;
+    }
+    CHECK(valid_utf8);
+    CHECK(mustela::sanitize_find_query("abcdef", 3).size() == 3);
+}
+
 }
 
 int main() {
@@ -453,6 +487,7 @@ int main() {
     test_browsing_data_kinds();
     test_normalize_url();
     test_perf_module();
+    test_ui_text();
 
     if (failures > 0) {
         std::fprintf(stderr, "%d/%d checks failed\n", failures, checks);
