@@ -1,12 +1,15 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <psapi.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -17,6 +20,7 @@
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
 #include "perf.hpp"
+#include "permissions.hpp"
 #include "privacy.hpp"
 #include "site_rules.hpp"
 #include "ui_text.hpp"
@@ -24,6 +28,7 @@
 
 #include <WebKit/WebKit2_C.h>
 #include <WebKit/WKContext.h>
+#include <WebKit/WKContextDownloadClient.h>
 #include <WebKit/WKView.h>
 #include <WebKit/WKPage.h>
 #include <WebKit/WKPageUIClient.h>
@@ -39,6 +44,12 @@
 #include <WebKit/WKPageNavigationClient.h>
 #include <WebKit/WKPreferencesRefPrivate.h>
 #include <WebKit/WKUserContentExtensionStoreRef.h>
+#include <WebKit/WKGeolocationPermissionRequest.h>
+#include <WebKit/WKUserMediaPermissionRequest.h>
+#include <WebKit/WKAuthenticationChallenge.h>
+#include <WebKit/WKAuthenticationDecisionListener.h>
+#include <WebKit/WKCredential.h>
+#include <WebKit/WKProtectionSpace.h>
 
 int mustela_main(int argc, char** argv);
 
@@ -48,10 +59,12 @@ using mustela::CookiePolicy;
 using mustela::DataKind;
 using mustela::FingerprintPolicy;
 using mustela::Hardening;
+using mustela::PermissionDecision;
 using mustela::PrivacyPolicy;
 using mustela::ReferrerTrim;
 using mustela::Settings;
 using mustela::SiteDecision;
+using mustela::SiteRule;
 using mustela::SiteRules;
 using mustela::TabPrivacy;
 
@@ -83,6 +96,15 @@ enum : WORD {
     ID_FIND_CLOSE = 125,
     ID_ACC_FIND = 126,
     ID_FIND_COUNT = 127,
+    ID_ACC_ZOOM_IN = 128,
+    ID_ACC_ZOOM_OUT = 129,
+    ID_ACC_ZOOM_RESET = 130,
+    ID_PERM_ALLOW = 300,
+    ID_PERM_DENY = 301,
+    ID_PERM_ALWAYS = 302,
+    ID_PERM_NEVER = 303,
+    ID_CRED_USER = 310,
+    ID_CRED_PASS = 311,
     ID_PROMPT_TEXT = 200,
     ID_PROMPT_EDIT = 201
 };
@@ -222,6 +244,12 @@ std::string profile_path(const char* name) {
 
 struct WinTab;
 
+struct WinDownload {
+    std::string name;
+    std::uint64_t received = 0;
+    std::int64_t total = 0;
+};
+
 struct Browser {
     Settings settings;
     PrivacyPolicy privacy;
@@ -255,6 +283,7 @@ struct Browser {
     bool memory_over = false;
     bool startup_marked = false;
     double startup_entry_ms = 0;
+    std::map<WKDownloadRef, WinDownload> downloads;
 
     std::vector<std::unique_ptr<WinTab>> tabs;
     int active = -1;
@@ -278,6 +307,8 @@ struct WinTab {
     TabPrivacy privacy = TabPrivacy::Normal;
     std::string uri;
     std::string title;
+    double scale = 1.0;
+    int crashes = 0;
     mustela::LoadTimer load;
 };
 
@@ -389,6 +420,29 @@ void apply_process_model(WKContextRef context, const std::string& name) {
         ? kWKProcessModelSharedSecondaryProcess
         : kWKProcessModelMultipleSecondaryProcesses;
     WKContextSetProcessModel(context, model);
+}
+
+const double zoom_steps[] = {0.3, 0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
+
+double zoom_next(double current, int direction) {
+    const size_t count = sizeof(zoom_steps) / sizeof(zoom_steps[0]);
+    if (direction > 0) {
+        for (size_t i = 0; i < count; ++i) {
+            if (zoom_steps[i] > current + 0.001) return zoom_steps[i];
+        }
+        return zoom_steps[count - 1];
+    }
+    if (direction < 0) {
+        for (size_t i = count; i > 0; --i) {
+            if (zoom_steps[i - 1] < current - 0.001) return zoom_steps[i - 1];
+        }
+        return zoom_steps[0];
+    }
+    return 1.0;
+}
+
+void apply_tab_scale(WinTab& tab) {
+    if (tab.page) WKPageSetScaleFactor(tab.page, tab.scale, WKPointMake(0, 0));
 }
 
 #pragma warning(push)
@@ -507,6 +561,21 @@ std::string compose_status(Browser& b) {
     if (b.privacy.fingerprint.active()) text += " · fp";
     if (b.memory_over) {
         text += " · mem " + std::to_string(static_cast<int>(b.memory_bytes / (1024 * 1024))) + " MB";
+    }
+    if (!b.downloads.empty()) {
+        std::string line;
+        if (b.downloads.size() == 1) {
+            const WinDownload& state = b.downloads.begin()->second;
+            if (state.total > 0 && state.received <= static_cast<std::uint64_t>(state.total)) {
+                double pct = static_cast<double>(state.received) / static_cast<double>(state.total);
+                line = "↓ " + state.name + " " + std::to_string(static_cast<int>(pct * 100.0)) + "%";
+            } else {
+                line = "↓ " + state.name;
+            }
+        } else {
+            line = "↓ " + std::to_string(b.downloads.size()) + " downloads";
+        }
+        text = line + " · " + text;
     }
     return text;
 }
@@ -641,11 +710,13 @@ void did_commit_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* cl
     WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
     if (!browser) return;
     apply_view_policy(tab, tab.uri);
+    apply_tab_scale(tab);
 }
 
 void did_finish_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* client_info) {
     WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
     if (!browser || tab.uri.empty()) return;
+    tab.crashes = 0;
     if (browser->privacy.records_history(tab.privacy)) {
         browser->history->record(tab.uri, tab.title, static_cast<std::int64_t>(std::time(nullptr)));
     }
@@ -731,6 +802,432 @@ bool uic_run_before_unload(WKPageRef, WKStringRef message, WKFrameRef, const voi
     int choice = MessageBoxW(browser->window, to_wide(body).c_str(), L"Leave site? — Mustela",
         MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND);
     return choice == IDYES;
+}
+
+void download_did_start(WKContextRef, WKDownloadRef download, const void*) {
+    if (!browser || !download) return;
+    browser->downloads[download] = WinDownload{};
+}
+
+std::string download_directory(const Browser& b) {
+    if (!b.settings.downloads_dir.empty()) return b.settings.downloads_dir;
+    std::string dir;
+    PWSTR downloads = nullptr;
+    if (SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &downloads) == S_OK && downloads) {
+        dir = to_utf8(downloads);
+        CoTaskMemFree(downloads);
+    }
+    if (dir.empty()) dir = to_utf8(app_base_dir()) + "\\downloads";
+    create_dir_chain(to_wide(dir));
+    return dir;
+}
+
+std::string download_path_for(const std::string& dir, const std::string& name) {
+    std::string path = dir + "\\" + name;
+    if (GetFileAttributesW(to_wide(path).c_str()) == INVALID_FILE_ATTRIBUTES) return path;
+    std::string base = name;
+    std::string ext;
+    size_t dot = name.rfind('.');
+    if (dot != std::string::npos && dot != 0) {
+        base = name.substr(0, dot);
+        ext = name.substr(dot);
+    }
+    for (int n = 2; n < 1000; ++n) {
+        std::string candidate = dir + "\\" + base + " (" + std::to_string(n) + ")" + ext;
+        if (GetFileAttributesW(to_wide(candidate).c_str()) == INVALID_FILE_ATTRIBUTES) return candidate;
+    }
+    return path;
+}
+
+WKStringRef download_decide_destination(WKContextRef, WKDownloadRef download, WKStringRef filename,
+    bool* allow_overwrite, const void*) {
+    Browser& b = *browser;
+    if (allow_overwrite) *allow_overwrite = false;
+    if (!download) return nullptr;
+    std::string suggested = filename ? wkstring_to_std(filename) : std::string();
+    std::string name = mustela::sanitize_filename(suggested.empty() ? "download" : suggested);
+    std::string dir = download_directory(b);
+    std::string path;
+    if (b.settings.downloads_mode == "ask") {
+        wchar_t buffer[MAX_PATH * 2] = {};
+        std::wstring wide_name = to_wide(name);
+        lstrcpynW(buffer, wide_name.c_str(), MAX_PATH * 2);
+        std::wstring wide_dir = to_wide(dir);
+        OPENFILENAMEW ofn = {};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = b.window;
+        ofn.lpstrFilter = L"All files (*.*)\0*.*\0";
+        ofn.lpstrFile = buffer;
+        ofn.nMaxFile = MAX_PATH * 2;
+        ofn.lpstrInitialDir = wide_dir.c_str();
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+        if (!GetSaveFileNameW(&ofn)) return nullptr;
+        path = to_utf8(buffer);
+    } else {
+        path = download_path_for(dir, name);
+    }
+    std::string shown = path;
+    size_t slash = shown.find_last_of("\\/");
+    if (slash != std::string::npos) shown = shown.substr(slash + 1);
+    auto it = b.downloads.find(download);
+    if (it != b.downloads.end()) it->second.name = shown;
+    flash_status(b, "downloading " + shown);
+    return make_wkstring(path);
+}
+
+void download_did_receive_response(WKContextRef, WKDownloadRef download, WKURLResponseRef response, const void*) {
+    if (!browser || !download) return;
+    auto it = browser->downloads.find(download);
+    if (it == browser->downloads.end()) return;
+    it->second.total = response ? WKURLResponseGetExpectedContentLength(response) : 0;
+}
+
+void download_did_receive_data(WKContextRef, WKDownloadRef download, std::uint64_t length, const void*) {
+    if (!browser || !download) return;
+    auto it = browser->downloads.find(download);
+    if (it == browser->downloads.end()) return;
+    it->second.received += length;
+    if (browser->hover_link.empty()) refresh_status(*browser);
+}
+
+void download_did_finish(WKContextRef, WKDownloadRef download, const void*) {
+    Browser& b = *browser;
+    auto it = b.downloads.find(download);
+    std::string name = it != b.downloads.end() ? it->second.name : std::string();
+    if (it != b.downloads.end()) b.downloads.erase(it);
+    flash_status(b, "download finished: " + name);
+}
+
+void download_did_fail(WKContextRef, WKDownloadRef download, WKErrorRef, const void*) {
+    Browser& b = *browser;
+    auto it = b.downloads.find(download);
+    std::string name = it != b.downloads.end() ? it->second.name : std::string();
+    if (it != b.downloads.end()) b.downloads.erase(it);
+    flash_status(b, "download failed: " + name);
+}
+
+void download_did_cancel(WKContextRef, WKDownloadRef download, const void*) {
+    Browser& b = *browser;
+    auto it = b.downloads.find(download);
+    if (it != b.downloads.end()) b.downloads.erase(it);
+    flash_status(b, "download cancelled");
+}
+
+struct PermState {
+    int answer = 0;
+};
+
+LRESULT CALLBACK perm_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    PermState* state = reinterpret_cast<PermState*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
+    switch (message) {
+        case WM_CREATE: {
+            auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+            SetWindowLongPtrW(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+            return 0;
+        }
+        case WM_COMMAND: {
+            if (!state) return 0;
+            WORD id = LOWORD(wparam);
+            if (id == ID_PERM_ALLOW || id == ID_PERM_DENY || id == ID_PERM_ALWAYS || id == ID_PERM_NEVER) {
+                state->answer = id;
+                DestroyWindow(wnd);
+            } else if (id == IDCANCEL) {
+                state->answer = 0;
+                DestroyWindow(wnd);
+            }
+            return 0;
+        }
+        case WM_CLOSE:
+            DestroyWindow(wnd);
+            return 0;
+        case WM_DESTROY:
+            PostThreadMessageW(GetCurrentThreadId(), WM_APP_PROMPT_DONE, 0, 0);
+            return 0;
+        default:
+            return DefWindowProcW(wnd, message, wparam, lparam);
+    }
+}
+
+int run_modal_permission(const std::string& host, const std::string& what) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW perm_class = {};
+        perm_class.lpfnWndProc = perm_proc;
+        perm_class.hInstance = GetModuleHandleW(nullptr);
+        perm_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+        perm_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        perm_class.lpszClassName = L"MUSTELA_PERM_WND";
+        RegisterClassW(&perm_class);
+        registered = true;
+    }
+    PermState state;
+    HWND owner = browser->window;
+    RECT owner_rect = {};
+    GetWindowRect(owner, &owner_rect);
+    int width = 460;
+    int height = 200;
+    int x = owner_rect.left + ((owner_rect.right - owner_rect.left) - width) / 2;
+    int y = owner_rect.top + ((owner_rect.bottom - owner_rect.top) - height) / 3;
+    std::string text = host + " wants to use " + what;
+    HWND wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MUSTELA_PERM_WND", L"Permission — Mustela",
+        WS_CAPTION | WS_SYSMENU, x, y, width, height, owner, nullptr, GetModuleHandleW(nullptr), &state);
+    if (!wnd) return 0;
+    CreateWindowExW(0, L"STATIC", to_wide(mustela::sanitize_dialog_text(text, 512)).c_str(),
+        WS_CHILD | WS_VISIBLE, 14, 14, width - 28, 60, wnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, WC_BUTTONW, L"Allow", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+        14, 90, 208, 34, wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_PERM_ALLOW)), GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, WC_BUTTONW, L"Deny", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+        width - 222, 90, 208, 34, wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_PERM_DENY)), GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, WC_BUTTONW, L"Always allow", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+        14, 134, 208, 34, wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_PERM_ALWAYS)), GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, WC_BUTTONW, L"Never allow", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+        width - 222, 134, 208, 34, wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_PERM_NEVER)), GetModuleHandleW(nullptr), nullptr);
+    EnableWindow(owner, FALSE);
+    ShowWindow(wnd, SW_SHOW);
+    UpdateWindow(wnd);
+    SetForegroundWindow(wnd);
+    for (;;) {
+        MSG msg = {};
+        int got = GetMessageW(&msg, nullptr, 0, 0);
+        if (got <= 0) {
+            if (got == 0) PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (msg.message == WM_APP_PROMPT_DONE) break;
+        if (!IsDialogMessageW(wnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!IsWindow(wnd)) break;
+    }
+    EnableWindow(owner, TRUE);
+    SetActiveWindow(owner);
+    if (IsWindow(wnd)) DestroyWindow(wnd);
+    return state.answer;
+}
+
+struct CredState {
+    std::wstring user;
+    std::wstring pass;
+    bool confirmed = false;
+};
+
+LRESULT CALLBACK cred_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    CredState* state = reinterpret_cast<CredState*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
+    switch (message) {
+        case WM_CREATE: {
+            auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+            SetWindowLongPtrW(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+            return 0;
+        }
+        case WM_COMMAND:
+            if (!state) return 0;
+            if (LOWORD(wparam) == IDOK) {
+                state->confirmed = true;
+                state->user = get_window_text(GetDlgItem(wnd, ID_CRED_USER));
+                state->pass = get_window_text(GetDlgItem(wnd, ID_CRED_PASS));
+                DestroyWindow(wnd);
+                return 0;
+            }
+            if (LOWORD(wparam) == IDCANCEL) {
+                DestroyWindow(wnd);
+                return 0;
+            }
+            return 0;
+        case WM_CLOSE:
+            DestroyWindow(wnd);
+            return 0;
+        case WM_DESTROY:
+            PostThreadMessageW(GetCurrentThreadId(), WM_APP_PROMPT_DONE, 0, 0);
+            return 0;
+        default:
+            return DefWindowProcW(wnd, message, wparam, lparam);
+    }
+}
+
+bool run_modal_credentials(const std::string& message, const std::string& default_user,
+    std::string& user, std::string& pass) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW cred_class = {};
+        cred_class.lpfnWndProc = cred_proc;
+        cred_class.hInstance = GetModuleHandleW(nullptr);
+        cred_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+        cred_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        cred_class.lpszClassName = L"MUSTELA_CRED_WND";
+        RegisterClassW(&cred_class);
+        registered = true;
+    }
+    CredState state;
+    HWND owner = browser->window;
+    RECT owner_rect = {};
+    GetWindowRect(owner, &owner_rect);
+    int width = 440;
+    int height = 210;
+    int x = owner_rect.left + ((owner_rect.right - owner_rect.left) - width) / 2;
+    int y = owner_rect.top + ((owner_rect.bottom - owner_rect.top) - height) / 3;
+    HWND wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MUSTELA_CRED_WND", L"Authentication — Mustela",
+        WS_CAPTION | WS_SYSMENU, x, y, width, height, owner, nullptr, GetModuleHandleW(nullptr), &state);
+    if (!wnd) return false;
+    CreateWindowExW(0, L"STATIC", to_wide(mustela::sanitize_dialog_text(message, 512)).c_str(),
+        WS_CHILD | WS_VISIBLE, 14, 14, width - 28, 40, wnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", to_wide(default_user).c_str(),
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP, 14, 62, width - 28, 30, wnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CRED_USER)), GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP, 14, 100, width - 28, 30, wnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CRED_PASS)), GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, WC_BUTTONW, L"Sign in", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+        width - 222, 142, 100, 34, wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, WC_BUTTONW, L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+        width - 114, 142, 100, 34, wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), GetModuleHandleW(nullptr), nullptr);
+    EnableWindow(owner, FALSE);
+    ShowWindow(wnd, SW_SHOW);
+    UpdateWindow(wnd);
+    SetForegroundWindow(wnd);
+    SetFocus(GetDlgItem(wnd, default_user.empty() ? ID_CRED_USER : ID_CRED_PASS));
+    SendMessageW(GetDlgItem(wnd, ID_CRED_USER), EM_SETSEL, 0, -1);
+    for (;;) {
+        MSG msg = {};
+        int got = GetMessageW(&msg, nullptr, 0, 0);
+        if (got <= 0) {
+            if (got == 0) PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (msg.message == WM_APP_PROMPT_DONE) break;
+        if (!IsDialogMessageW(wnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!IsWindow(wnd)) break;
+    }
+    EnableWindow(owner, TRUE);
+    SetActiveWindow(owner);
+    if (IsWindow(wnd)) DestroyWindow(wnd);
+    if (!state.confirmed) return false;
+    user = to_utf8(state.user);
+    pass = to_utf8(state.pass);
+    return true;
+}
+
+int resolve_permission_answer(WinTab& tab, const std::string& what, const std::string& setting) {
+    std::string host = tab.uri.empty() ? std::string() : mustela::host_from_uri(tab.uri);
+    if (host.empty()) host = "this site";
+    mustela::PermissionChoice global = mustela::permission_choice_from(setting);
+    SiteRule rule = browser->sites ? browser->sites->policy_for(host).permissions : SiteRule::Default;
+    PermissionDecision decision = mustela::resolve_permission(global, rule);
+    if (decision == PermissionDecision::Denied) return ID_PERM_DENY;
+    if (decision == PermissionDecision::Granted) return ID_PERM_ALLOW;
+    int answer = run_modal_permission(host, what);
+    if ((answer == ID_PERM_ALWAYS || answer == ID_PERM_NEVER) && browser->sites
+        && tab.privacy != TabPrivacy::Private) {
+        const mustela::SitePolicy* existing = browser->sites->find(host);
+        mustela::SitePolicy policy = existing ? *existing : mustela::SitePolicy{};
+        policy.permissions = answer == ID_PERM_ALWAYS ? SiteRule::Allow : SiteRule::Deny;
+        browser->sites->set(host, policy);
+        browser->sites->save();
+        flash_status(*browser, "permission saved for " + host);
+    }
+    return answer;
+}
+
+void uic_decide_geolocation(WKPageRef, WKFrameRef, WKSecurityOriginRef,
+    WKGeolocationPermissionRequestRef request, const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!browser || !request) return;
+    int answer = resolve_permission_answer(tab, "your location", browser->settings.permissions_geolocation);
+    if (answer == ID_PERM_DENY || answer == ID_PERM_NEVER) {
+        WKGeolocationPermissionRequestDeny(request);
+    } else {
+        WKGeolocationPermissionRequestAllow(request);
+    }
+}
+
+void uic_decide_user_media(WKPageRef, WKFrameRef, WKSecurityOriginRef, WKSecurityOriginRef,
+    WKUserMediaPermissionRequestRef request, const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!browser || !request) return;
+    std::string setting;
+    if (browser->settings.permissions_camera == "deny" || browser->settings.permissions_microphone == "deny") {
+        setting = "deny";
+    } else if (browser->settings.permissions_camera == "ask" || browser->settings.permissions_microphone == "ask") {
+        setting = "ask";
+    } else {
+        setting = "allow";
+    }
+    int answer = resolve_permission_answer(tab, "camera or microphone", setting);
+    if (answer == ID_PERM_DENY || answer == ID_PERM_NEVER) {
+        WKUserMediaPermissionRequestDeny(request, kWKPermissionDenied);
+    } else {
+        WkHold none(make_wkstring(""));
+        WKUserMediaPermissionRequestAllow(request, static_cast<WKStringRef>(none.ref),
+            static_cast<WKStringRef>(none.ref));
+    }
+}
+
+void nav_web_process_did_terminate(WKPageRef, WKProcessTerminationReason reason, const void* client_info) {
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    if (!browser) return;
+    ++tab.crashes;
+    const char* why = "crashed";
+    if (reason == kWKProcessTerminationReasonExceededMemoryLimit) why = "ran out of memory";
+    else if (reason == kWKProcessTerminationReasonRequestedByClient) why = "was stopped";
+    std::string text = std::string("web process ") + why;
+    if (tab.crashes <= 2) {
+        WKPageReload(tab.page);
+        flash_status(*browser, text + " — reloading");
+    } else {
+        flash_status(*browser, text + " — Ctrl+R to reload");
+    }
+}
+
+void nav_did_receive_authentication_challenge(WKPageRef, WKAuthenticationChallengeRef challenge,
+    const void*) {
+    if (!browser || !challenge) return;
+    WkHold space(WKAuthenticationChallengeGetProtectionSpace(challenge));
+    bool server_trust = false;
+    bool proxy = false;
+    std::string host;
+    int port = 0;
+    std::string realm;
+    if (space.ref) {
+        WKProtectionSpaceRef protection = static_cast<WKProtectionSpaceRef>(space.ref);
+        server_trust = WKProtectionSpaceGetAuthenticationScheme(protection)
+            == kWKProtectionSpaceAuthenticationSchemeServerTrustEvaluationRequested;
+        proxy = WKProtectionSpaceGetIsProxy(protection) != 0;
+        WkHold host_hold(WKProtectionSpaceCopyHost(protection));
+        host = host_hold.ref ? wkstring_to_std(static_cast<WKStringRef>(host_hold.ref)) : std::string();
+        port = WKProtectionSpaceGetPort(protection);
+        WkHold realm_hold(WKProtectionSpaceCopyRealm(protection));
+        realm = realm_hold.ref ? wkstring_to_std(static_cast<WKStringRef>(realm_hold.ref)) : std::string();
+    }
+    WKAuthenticationDecisionListenerRef listener = WKAuthenticationChallengeGetDecisionListener(challenge);
+    if (server_trust) {
+        flash_status(*browser, "TLS certificate rejected on " + (host.empty() ? "this site" : host));
+        if (listener) WKAuthenticationDecisionListenerRejectProtectionSpaceAndContinue(listener);
+        return;
+    }
+    std::string label = (proxy ? "proxy " : "") + (host.empty() ? "this site" : host) + ":"
+        + std::to_string(port);
+    if (!realm.empty()) label += " (" + mustela::sanitize_dialog_text(realm, 256) + ")";
+    std::string default_user;
+    WkHold proposed(WKAuthenticationChallengeGetProposedCredential(challenge));
+    if (proposed.ref) {
+        WkHold user_hold(WKCredentialCopyUser(static_cast<WKCredentialRef>(proposed.ref)));
+        if (user_hold.ref) default_user = wkstring_to_std(static_cast<WKStringRef>(user_hold.ref));
+    }
+    std::string user;
+    std::string pass;
+    if (!run_modal_credentials("Sign in to " + label, default_user, user, pass)) {
+        if (listener) WKAuthenticationDecisionListenerCancel(listener);
+        return;
+    }
+    WkHold user_hold(make_wkstring(user));
+    WkHold pass_hold(make_wkstring(pass));
+    WKCredentialRef credential = WKCredentialCreate(static_cast<WKStringRef>(user_hold.ref),
+        static_cast<WKStringRef>(pass_hold.ref), kWKCredentialPersistenceForSession);
+    if (listener && credential) WKAuthenticationDecisionListenerUseCredential(listener, credential);
+    if (credential) WKRelease(credential);
 }
 
 void uic_set_status_text(WKPageRef, WKStringRef text, const void* client_info) {
@@ -927,6 +1424,8 @@ void set_page_clients(WinTab& tab) {
     navigation.didCommitNavigation = did_commit_navigation;
     navigation.didFinishNavigation = did_finish_navigation;
     navigation.didFailProvisionalNavigation = did_fail_provisional_navigation;
+    navigation.webProcessDidTerminate = nav_web_process_did_terminate;
+    navigation.didReceiveAuthenticationChallenge = nav_did_receive_authentication_challenge;
     WKPageSetPageNavigationClient(tab.page, &navigation.base);
 
     WKPageUIClientV6 ui = {};
@@ -941,6 +1440,8 @@ void set_page_clients(WinTab& tab) {
     ui.runBeforeUnloadConfirmPanel = uic_run_before_unload;
     ui.setStatusText = uic_set_status_text;
     ui.mouseDidMoveOverElement = uic_mouse_did_move_over_element;
+    ui.decidePolicyForGeolocationPermissionRequest = uic_decide_geolocation;
+    ui.decidePolicyForUserMediaPermissionRequest = uic_decide_user_media;
     WKPageSetPageUIClient(tab.page, &ui.base);
 
     WKPageFindClientV0 find = {};
@@ -986,6 +1487,8 @@ std::unique_ptr<WinTab> make_tab(TabPrivacy request) {
 
     double dpi = static_cast<double>(GetDpiForWindow(browser->window));
     if (dpi > 0) WKPageSetCustomBackingScaleFactor(tab->page, dpi / 96.0);
+    tab->scale = browser->settings.zoom_default;
+    apply_tab_scale(*tab);
 
     ShowWindow(WKViewGetWindow(tab->view), SW_HIDE);
     return tab;
@@ -1324,6 +1827,19 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
                 case ID_ACC_FIND:
                     show_find_ui(b, true);
                     return 0;
+                case ID_ACC_ZOOM_IN:
+                case ID_ACC_ZOOM_OUT:
+                case ID_ACC_ZOOM_RESET: {
+                    WinTab* tab = active_tab(b);
+                    if (tab && tab->page) {
+                        if (id == ID_ACC_ZOOM_IN) tab->scale = zoom_next(tab->scale, 1);
+                        else if (id == ID_ACC_ZOOM_OUT) tab->scale = zoom_next(tab->scale, -1);
+                        else tab->scale = 1.0;
+                        apply_tab_scale(*tab);
+                        flash_status(b, "zoom " + std::to_string(static_cast<int>(tab->scale * 100.0)) + "%");
+                    }
+                    return 0;
+                }
                 case ID_FIND_NEXT:
                     find_run(b, 1);
                     return 0;
@@ -1408,6 +1924,20 @@ int mustela_main(int argc, char** argv) {
     WkHold context_configuration(WKContextConfigurationCreate());
     b.context = WKContextCreateWithConfiguration(static_cast<WKContextConfigurationRef>(context_configuration.ref));
     apply_process_model(b.context, b.settings.process_model);
+
+    WKContextDownloadClientV0 download_client = {};
+    download_client.base.version = 0;
+    download_client.didStart = download_did_start;
+    download_client.decideDestinationWithSuggestedFilename = download_decide_destination;
+    download_client.didReceiveResponse = download_did_receive_response;
+    download_client.didReceiveData = download_did_receive_data;
+    download_client.didFinish = download_did_finish;
+    download_client.didFail = download_did_fail;
+    download_client.didCancel = download_did_cancel;
+#pragma warning(push)
+#pragma warning(disable : 4996)
+    WKContextSetDownloadClient(b.context, &download_client.base);
+#pragma warning(pop)
 
     create_dir_chain(profile_dir_wide());
     std::wstring profile = profile_dir_wide();
@@ -1507,9 +2037,14 @@ int mustela_main(int argc, char** argv) {
         {FVIRTKEY | FCONTROL, 'H', ID_ACC_HISTORY},
         {FVIRTKEY | FCONTROL, 'F', ID_ACC_FIND},
         {FVIRTKEY | FALT, VK_LEFT, ID_ACC_BACK},
-        {FVIRTKEY | FALT, VK_RIGHT, ID_ACC_FORWARD}
+        {FVIRTKEY | FALT, VK_RIGHT, ID_ACC_FORWARD},
+        {FVIRTKEY | FCONTROL, VK_OEM_PLUS, ID_ACC_ZOOM_IN},
+        {FVIRTKEY | FCONTROL, VK_ADD, ID_ACC_ZOOM_IN},
+        {FVIRTKEY | FCONTROL, VK_OEM_MINUS, ID_ACC_ZOOM_OUT},
+        {FVIRTKEY | FCONTROL, VK_SUBTRACT, ID_ACC_ZOOM_OUT},
+        {FVIRTKEY | FCONTROL, '0', ID_ACC_ZOOM_RESET}
     };
-    HACCEL accel = CreateAcceleratorTableW(accelerators, 10);
+    HACCEL accel = CreateAcceleratorTableW(accelerators, 15);
 
     b.watcher_thread = CreateThread(nullptr, 0, watcher_main, nullptr, 0, nullptr);
 

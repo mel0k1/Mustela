@@ -1,4 +1,6 @@
 WKArray.h
+WKAuthenticationChallenge.h
+WKAuthenticationDecisionListener.h
 WKBackForwardListItemRef.h
 WKBackForwardListRef.h
 WKBase.h
@@ -13,6 +15,8 @@ WKContextDownloadClient.h
 WKContextHistoryClient.h
 WKContextInjectedBundleClient.h
 WKCookieManager.h
+WKCredential.h
+WKCredentialTypes.h
 WKData.h
 WKDeclarationSpecifiers.h
 WKDeprecated.h
@@ -63,6 +67,8 @@ WKPluginLoadPolicy.h
 WKPreferencesRef.h
 WKPreferencesRefPrivate.h
 WKProcessTerminationReason.h
+WKProtectionSpace.h
+WKProtectionSpaceTypes.h
 WKString.h
 WKType.h
 WKURL.h
