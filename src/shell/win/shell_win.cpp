@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "browsing_data.hpp"
+#include "blocklist.hpp"
 #include "config.hpp"
 #include "fingerprint.hpp"
 #include "fingerprint_scripts.hpp"
@@ -22,6 +23,7 @@
 #include "perf.hpp"
 #include "permissions.hpp"
 #include "privacy.hpp"
+#include "session.hpp"
 #include "site_rules.hpp"
 #include "ui_text.hpp"
 #include "url.hpp"
@@ -42,6 +44,11 @@
 #include <WebKit/WKCookieManager.h>
 #include <WebKit/WKPageStateClient.h>
 #include <WebKit/WKPageNavigationClient.h>
+#include <WebKit/WKPageContextMenuClient.h>
+#include <WebKit/WKContextMenuItem.h>
+#include <WebKit/WKContextMenuItemTypes.h>
+#include <WebKit/WKBackForwardListRef.h>
+#include <WebKit/WKBackForwardListItemRef.h>
 #include <WebKit/WKPreferencesRefPrivate.h>
 #include <WebKit/WKUserContentExtensionStoreRef.h>
 #include <WebKit/WKGeolocationPermissionRequest.h>
@@ -99,6 +106,7 @@ enum : WORD {
     ID_ACC_ZOOM_IN = 128,
     ID_ACC_ZOOM_OUT = 129,
     ID_ACC_ZOOM_RESET = 130,
+    ID_ACC_FULLSCREEN = 131,
     ID_PERM_ALLOW = 300,
     ID_PERM_DENY = 301,
     ID_PERM_ALWAYS = 302,
@@ -278,6 +286,10 @@ struct Browser {
     WKWebsiteDataStoreRef persistent_store = nullptr;
     WKUserContentExtensionStoreRef filter_store = nullptr;
     WKUserContentFilterRef fonts_filter = nullptr;
+    WKUserContentFilterRef blocklist_filter = nullptr;
+    std::string session_file;
+    bool fullscreen_active = false;
+    WINDOWPLACEMENT saved_placement = {};
     std::unique_ptr<mustela::PerfLog> perf;
     std::int64_t memory_bytes = 0;
     bool memory_over = false;
@@ -467,6 +479,7 @@ void add_user_script(WKUserContentControllerRef content, const std::string& sour
 void apply_fingerprint(WinTab& tab, const FingerprintPolicy& fp) {
     WKUserContentControllerRemoveAllUserScripts(tab.content);
     WKUserContentControllerRemoveAllUserContentFilters(tab.content);
+    if (browser->privacy.gpc) add_user_script(tab.content, mustela::gpc_user_script());
     if (fp.block_webgl) add_user_script(tab.content, mustela::fp_scripts::WEBGL_BLOCK);
     if (fp.block_canvas_readback) add_user_script(tab.content, mustela::fp_scripts::CANVAS_BLANK);
     if (fp.referrer != ReferrerTrim::Off) {
@@ -474,6 +487,9 @@ void apply_fingerprint(WinTab& tab, const FingerprintPolicy& fp) {
     }
     if (fp.block_remote_fonts && browser->fonts_filter) {
         WKUserContentControllerAddUserContentFilter(tab.content, browser->fonts_filter);
+    }
+    if (browser->privacy.blocklist && browser->blocklist_filter) {
+        WKUserContentControllerAddUserContentFilter(tab.content, browser->blocklist_filter);
     }
 }
 
@@ -512,6 +528,27 @@ void compile_fonts_filter(Browser& b) {
         static_cast<WKStringRef>(json.ref), nullptr, on_fonts_filter_compiled);
 }
 
+void on_blocklist_filter_compiled(WKUserContentFilterRef filter, WKUserContentExtensionStoreResult result, void*) {
+    if (result != kWKUserContentExtensionStoreSuccess || !filter || !browser) return;
+    WKRetain(filter);
+    browser->blocklist_filter = filter;
+    for (std::unique_ptr<WinTab>& tab : browser->tabs) {
+        std::string uri = tab->uri;
+        if (!uri.empty()) apply_view_policy(*tab, uri);
+    }
+}
+
+void compile_blocklist_filter(Browser& b) {
+    if (!b.privacy.blocklist) return;
+    mustela::Blocklist list = mustela::default_blocklist(b.settings.blocklist_file);
+    std::string json = mustela::blocklist_rules_json(list.domains());
+    if (json.empty()) return;
+    WkHold json_hold(make_wkstring(json));
+    WkHold identifier(make_wkstring("mustela-blocklist"));
+    WKUserContentExtensionStoreCompile(b.filter_store, static_cast<WKStringRef>(identifier.ref),
+        static_cast<WKStringRef>(json_hold.ref), nullptr, on_blocklist_filter_compiled);
+}
+
 void clear_browsing_data(Browser& b) {
     std::vector<WKWebsiteDataStoreRef> stores;
     stores.push_back(b.persistent_store);
@@ -524,6 +561,71 @@ void clear_browsing_data(Browser& b) {
         WKHTTPCookieStoreDeleteAllCookies(cookies, nullptr, noop_store_callback);
         WKWebsiteDataStoreClearStorage(store, nullptr, noop_store_callback);
     }
+}
+
+void save_session_now(Browser& b) {
+    if (!b.settings.session_restore || b.session_file.empty()) return;
+    mustela::SessionData data;
+    data.active = b.active;
+    for (std::unique_ptr<WinTab>& tab : b.tabs) {
+        if (tab->privacy == TabPrivacy::Private) continue;
+        mustela::SessionTab entry;
+        entry.url = tab->uri;
+        entry.title = tab->title;
+        if (tab->page) {
+            WKBackForwardListRef list = WKPageGetBackForwardList(tab->page);
+            if (list) {
+                unsigned back_count = WKBackForwardListGetBackListCount(list);
+                for (unsigned i = back_count; i >= 1; --i) {
+                    WKBackForwardListItemRef item = WKBackForwardListGetItemAtIndex(list, -static_cast<int>(i));
+                    if (item) {
+                        WkHold url(WKBackForwardListItemCopyURL(item));
+                        if (url.ref) entry.back.push_back(wkurl_to_std(static_cast<WKURLRef>(url.ref)));
+                    }
+                }
+                unsigned forward_count = WKBackForwardListGetForwardListCount(list);
+                for (unsigned i = 1; i <= forward_count; ++i) {
+                    WKBackForwardListItemRef item = WKBackForwardListGetItemAtIndex(list, static_cast<int>(i));
+                    if (item) {
+                        WkHold url(WKBackForwardListItemCopyURL(item));
+                        if (url.ref) entry.forward.push_back(wkurl_to_std(static_cast<WKURLRef>(url.ref)));
+                    }
+                }
+            }
+        }
+        data.tabs.push_back(std::move(entry));
+    }
+    if (data.active < 0 || data.active >= static_cast<int>(data.tabs.size())) {
+        data.active = data.tabs.empty() ? 0 : static_cast<int>(data.tabs.size()) - 1;
+    }
+    mustela::save_session(b.session_file, data);
+}
+
+void enter_fullscreen_window(Browser& b) {
+    if (b.fullscreen_active || !b.window) return;
+    b.saved_placement.length = sizeof(WINDOWPLACEMENT);
+    if (!GetWindowPlacement(b.window, &b.saved_placement)) return;
+    MONITORINFO monitor = {};
+    monitor.cbSize = sizeof(monitor);
+    if (!GetMonitorInfoW(MonitorFromWindow(b.window, MONITOR_DEFAULTTOPRIMARY), &monitor)) return;
+    LONG_PTR style = GetWindowLongPtrW(b.window, GWL_STYLE);
+    SetWindowLongPtrW(b.window, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+    SetWindowPos(b.window, HWND_TOP, monitor.rcMonitor.left, monitor.rcMonitor.top,
+        monitor.rcMonitor.right - monitor.rcMonitor.left,
+        monitor.rcMonitor.bottom - monitor.rcMonitor.top,
+        SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    b.fullscreen_active = true;
+    flash_status(b, "fullscreen — F11 to exit");
+}
+
+void exit_fullscreen_window(Browser& b) {
+    if (!b.fullscreen_active || !b.window) return;
+    LONG_PTR style = GetWindowLongPtrW(b.window, GWL_STYLE);
+    SetWindowLongPtrW(b.window, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+    SetWindowPlacement(b.window, &b.saved_placement);
+    SetWindowPos(b.window, nullptr, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    b.fullscreen_active = false;
 }
 
 std::string tab_label(const WinTab& tab) {
@@ -649,6 +751,7 @@ void switch_tab(Browser& b, int index) {
     ShowWindow(WKViewGetWindow(tab.view), SW_SHOW);
     SetFocus(WKViewGetWindow(tab.view));
     refresh_chrome(b);
+    save_session_now(b);
     if (b.find_visible) find_run(b, 0);
 }
 
@@ -724,6 +827,7 @@ void did_finish_navigation(WKPageRef, WKNavigationRef, WKTypeRef, const void* cl
     if (elapsed >= 0.0) {
         record_perf(*browser, "pageload", elapsed, 0, tab.uri);
     }
+    save_session_now(*browser);
     on_tab_state_changed(tab);
 }
 
@@ -1248,6 +1352,71 @@ void uic_mouse_did_move_over_element(WKPageRef, WKHitTestResultRef hit_test, WKE
     refresh_status(b);
 }
 
+void cm_get_menu(WKPageRef, WKArrayRef proposed_menu, WKArrayRef* new_menu, WKHitTestResultRef hit_test,
+    WKTypeRef, const void* client_info) {
+    if (!new_menu) return;
+    WinTab& tab = *static_cast<WinTab*>(const_cast<void*>(client_info));
+    WKMutableArrayRef menu = WKMutableArrayCreate();
+    if (!menu) {
+        *new_menu = proposed_menu;
+        return;
+    }
+    auto add_item = [&menu](WKContextMenuItemTag tag, const char* title, bool enabled) {
+        if (!enabled) return;
+        WkHold text(make_wkstring(title));
+        WKContextMenuItemRef item = WKContextMenuItemCreateAsAction(tag,
+            static_cast<WKStringRef>(text.ref), true);
+        if (item) {
+            WKArrayAppendItem(menu, item);
+            WKRelease(item);
+        }
+    };
+    auto add_separator = [&menu]() {
+        WKContextMenuItemRef item = WKContextMenuItemSeparatorItem();
+        if (item) {
+            WKArrayAppendItem(menu, item);
+            WKRelease(item);
+        }
+    };
+    add_item(kWKContextMenuItemTagGoBack, "Back", tab.page && WKPageCanGoBack(tab.page));
+    add_item(kWKContextMenuItemTagGoForward, "Forward", tab.page && WKPageCanGoForward(tab.page));
+    add_item(kWKContextMenuItemTagReload, "Reload", tab.page != nullptr);
+    add_item(kWKContextMenuItemTagStop, "Stop", tab.page != nullptr);
+    add_separator();
+    WkHold link(hit_test ? WKHitTestResultCopyAbsoluteLinkURL(hit_test) : nullptr);
+    if (link.ref) {
+        add_item(kWKContextMenuItemTagOpenLinkInNewWindow, "Open link in new tab", true);
+        add_item(kWKContextMenuItemTagDownloadLinkToDisk, "Save link as", true);
+        add_item(kWKContextMenuItemTagCopyLinkToClipboard, "Copy link address", true);
+        add_separator();
+    }
+    WkHold image(hit_test ? WKHitTestResultCopyAbsoluteImageURL(hit_test) : nullptr);
+    if (image.ref) {
+        add_item(kWKContextMenuItemTagOpenImageInNewWindow, "Open image in new tab", true);
+        add_item(kWKContextMenuItemTagDownloadImageToDisk, "Save image as", true);
+        add_item(kWKContextMenuItemTagCopyImageToClipboard, "Copy image", true);
+        add_item(kWKContextMenuItemTagCopyImageURLToClipboard, "Copy image address", true);
+        add_separator();
+    }
+    WkHold lookup(hit_test ? WKHitTestResultCopyLookupText(hit_test) : nullptr);
+    bool editable = hit_test && WKHitTestResultIsContentEditable(hit_test);
+    if (editable) {
+        add_item(kWKContextMenuItemTagCut, "Cut", true);
+        add_item(kWKContextMenuItemTagCopy, "Copy", true);
+        add_item(kWKContextMenuItemTagPaste, "Paste", true);
+        add_item(kWKContextMenuItemTagSelectAll, "Select all", true);
+    } else if (lookup.ref) {
+        add_item(kWKContextMenuItemTagCopy, "Copy", true);
+    }
+    if (WKArrayGetSize(menu) == 0 && proposed_menu) {
+        size_t count = WKArrayGetSize(proposed_menu);
+        for (size_t i = 0; i < count; ++i) {
+            WKArrayAppendItem(menu, WKArrayGetItemAtIndex(proposed_menu, i));
+        }
+    }
+    *new_menu = menu;
+}
+
 void find_did_find(WKPageRef, WKStringRef, unsigned match_count, const void*) {
     Browser& b = *browser;
     if (!b.find_visible || !b.find_count) return;
@@ -1450,6 +1619,12 @@ void set_page_clients(WinTab& tab) {
     find.didFindString = find_did_find;
     find.didFailToFindString = find_did_fail;
     WKPageSetPageFindClient(tab.page, &find.base);
+
+    WKPageContextMenuClientV2 context_menu = {};
+    context_menu.base.version = 2;
+    context_menu.base.clientInfo = &tab;
+    context_menu.getContextMenuFromProposedMenu = cm_get_menu;
+    WKPageSetPageContextMenuClient(tab.page, &context_menu.base);
 }
 
 std::unique_ptr<WinTab> make_tab(TabPrivacy request) {
@@ -1541,6 +1716,7 @@ void close_tab(Browser& b, int index) {
         b.active--;
     }
     refresh_chrome(b);
+    save_session_now(b);
 }
 
 void fill_history_list(Browser& b) {
@@ -1840,6 +2016,10 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
                     }
                     return 0;
                 }
+                case ID_ACC_FULLSCREEN:
+                    if (b.fullscreen_active) exit_fullscreen_window(b);
+                    else enter_fullscreen_window(b);
+                    return 0;
                 case ID_FIND_NEXT:
                     find_run(b, 1);
                     return 0;
@@ -1864,6 +2044,7 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
             }
         }
         case WM_DESTROY: {
+            save_session_now(b);
             b.watcher_stop = true;
             if (b.watcher_thread) {
                 WaitForSingleObject(b.watcher_thread, 2000);
@@ -1967,6 +2148,8 @@ int mustela_main(int argc, char** argv) {
     WkHold filter_path(make_wkstring(profile_path("filters")));
     b.filter_store = WKUserContentExtensionStoreCreate(static_cast<WKStringRef>(filter_path.ref));
     compile_fonts_filter(b);
+    compile_blocklist_filter(b);
+    b.session_file = config_path("session.json");
 
     WNDCLASSW main_class = {};
     main_class.lpfnWndProc = main_proc;
@@ -2042,14 +2225,30 @@ int mustela_main(int argc, char** argv) {
         {FVIRTKEY | FCONTROL, VK_ADD, ID_ACC_ZOOM_IN},
         {FVIRTKEY | FCONTROL, VK_OEM_MINUS, ID_ACC_ZOOM_OUT},
         {FVIRTKEY | FCONTROL, VK_SUBTRACT, ID_ACC_ZOOM_OUT},
-        {FVIRTKEY | FCONTROL, '0', ID_ACC_ZOOM_RESET}
+        {FVIRTKEY | FCONTROL, '0', ID_ACC_ZOOM_RESET},
+        {FVIRTKEY, VK_F11, ID_ACC_FULLSCREEN}
     };
-    HACCEL accel = CreateAcceleratorTableW(accelerators, 15);
+    HACCEL accel = CreateAcceleratorTableW(accelerators, 16);
 
     b.watcher_thread = CreateThread(nullptr, 0, watcher_main, nullptr, 0, nullptr);
 
     TabPrivacy first_request = start_private ? TabPrivacy::Private : b.privacy.default_private;
-    open_tab(b, start_url.empty() ? b.settings.homepage : start_url, first_request);
+    bool restored = false;
+    if (b.settings.session_restore && start_url.empty() && first_request != TabPrivacy::Private) {
+        mustela::SessionData data;
+        if (mustela::load_session(b.session_file, data) && !data.tabs.empty()) {
+            for (const mustela::SessionTab& entry : data.tabs) {
+                open_tab(b, entry.url, first_request);
+            }
+            if (data.active > 0 && data.active < static_cast<int>(b.tabs.size())) {
+                switch_tab(b, data.active);
+            }
+            restored = true;
+        }
+    }
+    if (!restored) {
+        open_tab(b, start_url.empty() ? b.settings.homepage : start_url, first_request);
+    }
 
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
@@ -2075,6 +2274,7 @@ int mustela_main(int argc, char** argv) {
 
     if (b.filter_store) WKRelease(b.filter_store);
     if (b.fonts_filter) WKRelease(b.fonts_filter);
+    if (b.blocklist_filter) WKRelease(b.blocklist_filter);
     if (b.persistent_store) WKRelease(b.persistent_store);
     if (b.context) WKRelease(b.context);
 
