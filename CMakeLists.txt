@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mustela
-    VERSION 0.9.1
+    VERSION 0.10.0
     DESCRIPTION "Privacy-first, cross-platform browser engine built on WebKit"
     LANGUAGES CXX)
 
@@ -89,6 +89,17 @@ if(MUSTELA_BUILD_SHELL)
             target_link_libraries(mustela-bench PRIVATE ${WEBKIT_LIBRARIES})
             target_compile_options(mustela-bench PRIVATE ${WEBKIT_CFLAGS_OTHER})
         endif()
+
+        pkg_check_modules(WEBEXT REQUIRED webkit2gtk-web-extension-4.1)
+        add_library(mustela-webext MODULE src/webext/gtk/webext_gtk.cpp)
+        target_include_directories(mustela-webext PRIVATE ${WEBEXT_INCLUDE_DIRS})
+        target_link_directories(mustela-webext PRIVATE ${WEBEXT_LIBRARY_DIRS})
+        target_link_libraries(mustela-webext PRIVATE ${WEBEXT_LIBRARIES})
+        target_compile_options(mustela-webext PRIVATE ${WEBEXT_CFLAGS_OTHER})
+        set_target_properties(mustela-webext PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+        target_compile_definitions(mustela PRIVATE
+            MUSTELA_WEBEXT_DIR="${CMAKE_BINARY_DIR}")
     endif()
 
     target_link_libraries(mustela PRIVATE mustela_warnings)
