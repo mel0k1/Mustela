@@ -21,6 +21,7 @@
 #include "privacy.hpp"
 #include "site_rules.hpp"
 #include "tab.hpp"
+#include "ui_text.hpp"
 #include "url.hpp"
 
 int mustela_main(int argc, char** argv);
@@ -48,6 +49,11 @@ struct Browser {
     GtkWidget* private_toggle = nullptr;
     GtkWidget* status_label = nullptr;
     GtkWidget* history_window = nullptr;
+    GtkWidget* find_bar = nullptr;
+    GtkWidget* find_entry = nullptr;
+    GtkWidget* find_label = nullptr;
+    std::string find_query;
+    std::string hover_link;
     WebKitWebContext* normal_context = nullptr;
     WebKitWebContext* private_context = nullptr;
     std::unique_ptr<mustela::HistoryStore> history;
@@ -83,6 +89,10 @@ void apply_fingerprint(Browser& b, WebKitWebView* view, const FingerprintPolicy&
 void refresh_status(Browser& b);
 void flash_status(const char* text);
 void mark_startup(Browser& b);
+Tab* tab_from_view(Browser& b, WebKitWebView* view);
+void connect_tab_signals(Tab* tab);
+void run_find(Browser& b, int direction);
+void show_find_bar(Browser& b, bool show);
 
 void record_perf(Browser& b, const std::string& kind, double value_ms, std::int64_t value_bytes,
     const std::string& detail) {
@@ -185,6 +195,13 @@ gint tab_index(const Browser& b, const Tab* tab) {
     return -1;
 }
 
+Tab* tab_from_view(Browser& b, WebKitWebView* view) {
+    for (std::unique_ptr<Tab>& tab : b.tabs) {
+        if (tab->view() == view) return tab.get();
+    }
+    return nullptr;
+}
+
 std::string tab_label_text(const Tab& tab) {
     std::string text = tab.title();
     if (tab.is_private()) text = "private · " + text;
@@ -208,6 +225,10 @@ void update_window_title(Browser& b) {
 
 void refresh_status(Browser& b) {
     if (!b.status_label) return;
+    if (!b.hover_link.empty()) {
+        gtk_label_set_text(GTK_LABEL(b.status_label), ("→ " + b.hover_link).c_str());
+        return;
+    }
     Tab* tab = active_tab(b);
     std::string text;
     if (tab && tab->is_private()) text = "private · ";
@@ -436,7 +457,15 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
         if (tab && webkit_web_view_can_go_forward(tab->view())) webkit_web_view_go_forward(tab->view());
         return TRUE;
     }
+    if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_f) {
+        show_find_bar(b, TRUE);
+        return TRUE;
+    }
     if (mods == 0 && event->keyval == GDK_KEY_Escape) {
+        if (b.find_bar && gtk_widget_get_visible(b.find_bar)) {
+            show_find_bar(b, FALSE);
+            return TRUE;
+        }
         if (tab) webkit_web_view_stop_loading(tab->view());
         return TRUE;
     }
@@ -530,11 +559,215 @@ void on_url_activate(GtkEntry*, gpointer) {
 
 void on_switch_page(GtkNotebook*, GtkWidget*, guint, gpointer) {
     gtk_entry_set_progress_fraction(GTK_ENTRY(browser->url_entry), 0.0);
+    browser->hover_link.clear();
     refresh_chrome(*browser);
+    if (browser->find_bar && gtk_widget_get_visible(browser->find_bar)) {
+        run_find(*browser, 0);
+    }
 }
 
 void on_page_removed(GtkNotebook*, GtkWidget*, gpointer) {
     refresh_chrome(*browser);
+}
+
+void run_js_alert(Browser& b, const std::string& message) {
+    GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(b.window), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "%s", message.c_str());
+    gtk_window_set_title(GTK_WINDOW(dialog), "JavaScript — Mustela");
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+}
+
+bool run_js_confirm(Browser& b, const std::string& message) {
+    GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(b.window), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO, "%s", message.c_str());
+    gtk_window_set_title(GTK_WINDOW(dialog), "JavaScript — Mustela");
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    return response == GTK_RESPONSE_YES;
+}
+
+std::string run_js_prompt(Browser& b, const std::string& message, const std::string& default_text) {
+    GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(b.window), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_QUESTION, GTK_BUTTONS_OK_CANCEL, "%s", message.c_str());
+    gtk_window_set_title(GTK_WINDOW(dialog), "JavaScript — Mustela");
+    GtkWidget* entry = gtk_entry_new();
+    gtk_entry_set_text(GTK_ENTRY(entry), default_text.c_str());
+    gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+    gtk_widget_set_margin_start(entry, 12);
+    gtk_widget_set_margin_end(entry, 12);
+    gtk_widget_set_margin_bottom(entry, 6);
+    GtkWidget* area = gtk_message_dialog_get_message_area(GTK_MESSAGE_DIALOG(dialog));
+    gtk_box_pack_start(GTK_BOX(area), entry, FALSE, FALSE, 4);
+    gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
+    gtk_widget_show_all(dialog);
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    std::string text = gtk_entry_get_text(GTK_ENTRY(entry));
+    gtk_widget_destroy(dialog);
+    return response == GTK_RESPONSE_OK ? text : std::string();
+}
+
+gboolean on_script_dialog(WebKitWebView*, WebKitScriptDialog* dialog, gpointer) {
+    Browser& b = *browser;
+    const gchar* raw = webkit_script_dialog_get_message(dialog);
+    std::string message = mustela::sanitize_dialog_text(raw ? raw : "");
+    switch (webkit_script_dialog_get_dialog_type(dialog)) {
+        case WEBKIT_SCRIPT_DIALOG_ALERT:
+            run_js_alert(b, message);
+            return TRUE;
+        case WEBKIT_SCRIPT_DIALOG_CONFIRM:
+        case WEBKIT_SCRIPT_DIALOG_BEFORE_UNLOAD_CONFIRM:
+            webkit_script_dialog_confirm_set_confirmed(dialog, run_js_confirm(b, message) ? TRUE : FALSE);
+            return TRUE;
+        case WEBKIT_SCRIPT_DIALOG_PROMPT: {
+            const gchar* default_text = webkit_script_dialog_prompt_get_default_text(dialog);
+            std::string text = run_js_prompt(b, message, default_text ? default_text : "");
+            webkit_script_dialog_prompt_set_text(dialog, text.c_str());
+            return TRUE;
+        }
+        default:
+            return FALSE;
+    }
+}
+
+GtkWidget* on_view_create(WebKitWebView* view, WebKitNavigationAction* action, gpointer) {
+    Browser& b = *browser;
+    Tab* origin = tab_from_view(b, view);
+    bool priv = origin ? origin->is_private() : b.privacy.default_private == TabPrivacy::Private;
+    WebKitWebView* related = WEBKIT_WEB_VIEW(webkit_web_view_new_with_related_view(view));
+    harden_view(related, b.privacy.hardening);
+    WebKitURIRequest* request = webkit_navigation_action_get_request(action);
+    const gchar* target = request ? webkit_uri_request_get_uri(request) : nullptr;
+    apply_view_policy(b, related, target ? target : "");
+
+    Tab* tab = new Tab(related, priv);
+    tab->set_label(build_tab_label(b, tab));
+    b.tabs.emplace_back(tab);
+    gtk_notebook_append_page(GTK_NOTEBOOK(b.notebook), GTK_WIDGET(related), tab->label());
+    connect_tab_signals(tab);
+    return GTK_WIDGET(related);
+}
+
+void on_view_ready_to_show(WebKitWebView* view, gpointer) {
+    Browser& b = *browser;
+    Tab* tab = tab_from_view(b, view);
+    if (!tab) return;
+    gint idx = tab_index(b, tab);
+    if (idx >= 0) gtk_notebook_set_current_page(GTK_NOTEBOOK(b.notebook), idx);
+    refresh_chrome(b);
+}
+
+void on_view_close(WebKitWebView*, gpointer user_data) {
+    close_tab(*browser, static_cast<Tab*>(user_data));
+}
+
+void on_view_mouse_target_changed(WebKitWebView*, WebKitHitTestResult* hit_test, guint, gpointer user_data) {
+    Browser& b = *browser;
+    Tab* tab = static_cast<Tab*>(user_data);
+    if (active_tab(b) != tab) return;
+    const gchar* link = webkit_hit_test_result_get_link_uri(hit_test);
+    std::string next = link ? link : "";
+    if (next == b.hover_link) return;
+    b.hover_link = next;
+    refresh_status(b);
+}
+
+void on_find_found_text(WebKitFindController*, guint match_count, gpointer user_data) {
+    Browser& b = *browser;
+    Tab* tab = static_cast<Tab*>(user_data);
+    if (active_tab(b) != tab || !b.find_label) return;
+    std::string text = std::to_string(match_count) + (match_count == 1 ? " match" : " matches");
+    gtk_label_set_text(GTK_LABEL(b.find_label), text.c_str());
+}
+
+void on_find_failed(WebKitFindController*, gpointer user_data) {
+    Browser& b = *browser;
+    Tab* tab = static_cast<Tab*>(user_data);
+    if (active_tab(b) != tab || !b.find_label) return;
+    gtk_label_set_text(GTK_LABEL(b.find_label), "no matches");
+}
+
+void run_find(Browser& b, int direction) {
+    Tab* tab = active_tab(b);
+    if (!tab || !b.find_entry) return;
+    const gchar* raw = gtk_entry_get_text(GTK_ENTRY(b.find_entry));
+    std::string query = mustela::sanitize_find_query(raw ? raw : "");
+    WebKitFindController* finder = webkit_web_view_get_find_controller(tab->view());
+    if (query.empty()) {
+        webkit_find_controller_search_finish(finder);
+        if (b.find_label) gtk_label_set_text(GTK_LABEL(b.find_label), "");
+        return;
+    }
+    if (direction == 0 || query != b.find_query) {
+        b.find_query = query;
+        WebKitFindOptions options = static_cast<WebKitFindOptions>(
+            WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE | WEBKIT_FIND_OPTIONS_WRAP_AROUND);
+        webkit_find_controller_search(finder, query.c_str(), options, 1000);
+    } else if (direction > 0) {
+        webkit_find_controller_search_next(finder);
+    } else {
+        webkit_find_controller_search_previous(finder);
+    }
+}
+
+void show_find_bar(Browser& b, bool show) {
+    if (!b.find_bar) return;
+    if (show) {
+        gtk_widget_show_all(b.find_bar);
+        gtk_widget_grab_focus(b.find_entry);
+        return;
+    }
+    b.find_query.clear();
+    if (b.find_label) gtk_label_set_text(GTK_LABEL(b.find_label), "");
+    Tab* tab = active_tab(b);
+    if (tab) webkit_find_controller_search_finish(webkit_web_view_get_find_controller(tab->view()));
+    gtk_widget_hide(b.find_bar);
+    if (tab) gtk_widget_grab_focus(GTK_WIDGET(tab->view()));
+}
+
+void on_find_search_changed(GtkWidget*, gpointer) {
+    run_find(*browser, 0);
+}
+
+void on_find_next_clicked(GtkButton*, gpointer) {
+    run_find(*browser, 1);
+}
+
+void on_find_prev_clicked(GtkButton*, gpointer) {
+    run_find(*browser, -1);
+}
+
+void on_find_close_clicked(GtkButton*, gpointer) {
+    show_find_bar(*browser, FALSE);
+}
+
+gboolean on_find_entry_key(GtkWidget*, GdkEventKey* event, gpointer) {
+    Browser& b = *browser;
+    if (event->keyval == GDK_KEY_Return || event->keyval == GDK_KEY_KP_Enter) {
+        run_find(b, (event->state & GDK_SHIFT_MASK) ? -1 : 1);
+        return TRUE;
+    }
+    if (event->keyval == GDK_KEY_Escape) {
+        show_find_bar(b, FALSE);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void connect_tab_signals(Tab* tab) {
+    g_signal_connect(tab->view(), "notify::uri", G_CALLBACK(on_view_uri_changed), tab);
+    g_signal_connect(tab->view(), "notify::title", G_CALLBACK(on_view_title_changed), tab);
+    g_signal_connect(tab->view(), "notify::estimated-load-progress", G_CALLBACK(on_view_progress_changed), tab);
+    g_signal_connect(tab->view(), "load-changed", G_CALLBACK(on_view_load_changed), tab);
+    g_signal_connect(tab->view(), "load-failed", G_CALLBACK(on_view_load_failed), tab);
+    g_signal_connect(tab->view(), "create", G_CALLBACK(on_view_create), nullptr);
+    g_signal_connect(tab->view(), "ready-to-show", G_CALLBACK(on_view_ready_to_show), nullptr);
+    g_signal_connect(tab->view(), "close", G_CALLBACK(on_view_close), tab);
+    g_signal_connect(tab->view(), "script-dialog", G_CALLBACK(on_script_dialog), nullptr);
+    g_signal_connect(tab->view(), "mouse-target-changed", G_CALLBACK(on_view_mouse_target_changed), tab);
+    WebKitFindController* finder = webkit_web_view_get_find_controller(tab->view());
+    g_signal_connect(finder, "found-text", G_CALLBACK(on_find_found_text), tab);
+    g_signal_connect(finder, "failed-to-find-text", G_CALLBACK(on_find_failed), tab);
 }
 
 void on_close_tab_clicked(GtkButton*, gpointer user_data) {
@@ -585,11 +818,7 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     gtk_notebook_set_current_page(GTK_NOTEBOOK(b.notebook), idx);
     gtk_widget_show(GTK_WIDGET(view));
 
-    g_signal_connect(view, "notify::uri", G_CALLBACK(on_view_uri_changed), tab);
-    g_signal_connect(view, "notify::title", G_CALLBACK(on_view_title_changed), tab);
-    g_signal_connect(view, "notify::estimated-load-progress", G_CALLBACK(on_view_progress_changed), tab);
-    g_signal_connect(view, "load-changed", G_CALLBACK(on_view_load_changed), tab);
-    g_signal_connect(view, "load-failed", G_CALLBACK(on_view_load_failed), tab);
+    connect_tab_signals(tab);
 
     if (url && *url) webkit_web_view_load_uri(view, url);
     refresh_chrome(b);
@@ -1038,8 +1267,37 @@ int mustela_main(int argc, char** argv) {
     gtk_notebook_set_scrollable(GTK_NOTEBOOK(browser->notebook), TRUE);
     gtk_notebook_set_show_tabs(GTK_NOTEBOOK(browser->notebook), FALSE);
 
+    browser->find_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_container_set_border_width(GTK_CONTAINER(browser->find_bar), 2);
+    browser->find_entry = gtk_search_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(browser->find_entry), "Find in page");
+    gtk_widget_set_hexpand(browser->find_entry, TRUE);
+    browser->find_label = gtk_label_new("");
+    gtk_label_set_xalign(GTK_LABEL(browser->find_label), 1.0f);
+    GtkWidget* find_prev_btn = gtk_button_new_from_icon_name("go-up-symbolic", GTK_ICON_SIZE_MENU);
+    GtkWidget* find_next_btn = gtk_button_new_from_icon_name("go-down-symbolic", GTK_ICON_SIZE_MENU);
+    GtkWidget* find_close_btn = gtk_button_new_from_icon_name("window-close-symbolic", GTK_ICON_SIZE_MENU);
+    GtkWidget* find_buttons[] = {find_prev_btn, find_next_btn, find_close_btn};
+    for (GtkWidget* btn : find_buttons) {
+        gtk_button_set_relief(GTK_BUTTON(btn), GTK_RELIEF_NONE);
+        gtk_widget_set_focus_on_click(btn, FALSE);
+    }
+    gtk_widget_set_tooltip_text(find_prev_btn, "Previous match (Shift+Enter)");
+    gtk_widget_set_tooltip_text(find_next_btn, "Next match (Enter)");
+    gtk_box_pack_start(GTK_BOX(browser->find_bar), browser->find_entry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(browser->find_bar), browser->find_label, FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(browser->find_bar), find_prev_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(browser->find_bar), find_next_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(browser->find_bar), find_close_btn, FALSE, FALSE, 0);
+    g_signal_connect(browser->find_entry, "search-changed", G_CALLBACK(on_find_search_changed), nullptr);
+    g_signal_connect(browser->find_entry, "key-press-event", G_CALLBACK(on_find_entry_key), nullptr);
+    g_signal_connect(find_prev_btn, "clicked", G_CALLBACK(on_find_prev_clicked), nullptr);
+    g_signal_connect(find_next_btn, "clicked", G_CALLBACK(on_find_next_clicked), nullptr);
+    g_signal_connect(find_close_btn, "clicked", G_CALLBACK(on_find_close_clicked), nullptr);
+
     GtkWidget* layout = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_pack_start(GTK_BOX(layout), toolbar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(layout), browser->find_bar, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(layout), browser->notebook, TRUE, TRUE, 0);
     gtk_container_add(GTK_CONTAINER(window), layout);
 
@@ -1059,6 +1317,7 @@ int mustela_main(int argc, char** argv) {
     open_tab(*browser, url && *url ? url : browser->settings.homepage.c_str(), request);
 
     gtk_widget_show_all(window);
+    gtk_widget_hide(browser->find_bar);
     sample_memory(*browser);
     g_timeout_add_seconds(60, on_memory_timer, nullptr);
     gtk_main();
