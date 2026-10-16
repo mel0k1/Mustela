@@ -70,7 +70,16 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 - Built with the Windows SDK branch in CMake (`mustela-bench-win`) and compile-checked against the pinned upstream headers on every push. (done)
 - Second full engine review at v0.8.0 recorded in [GAPS.md](GAPS.md): browsing-platform gaps (popups, dialogs, downloads, find, zoom, permissions, certificates), privacy deepening candidates (GPC, tracking blocklist, secure DNS), performance leftovers and the Kiwi API surface, with a suggested milestone order. (done)
 
-## M5 — Kiwi browser
+## M5 — Browsing basics (done)
+
+- New windows and popups open as tabs on both ports: GTK `create` signal with related views, Windows `WKPageUIClient` V6 `createNewPage`; privacy context and data store are inherited from the originating tab, `ready-to-show`/`showPage` focuses the popup, JS `window.close()` closes the tab. (done)
+- JavaScript dialogs are native: alert, confirm, prompt (with editable default value) and beforeunload confirmation on both ports — GTK `script-dialog`, Windows `WKPageUIClient` async dialog listeners. (done)
+- Dialog text and find queries pass through `mustela::ui_text`: control characters stripped, CR/LF normalized, byte-capped with UTF-8-safe truncation — unit-tested in the core. (done)
+- Find in page: find bar (Ctrl+F) with next/previous (Enter/Shift+Enter), match counts, case-insensitive wrap-around search, re-search on tab switch — GTK `WebKitFindController`, Windows `WKPageFindClient` + `WKPageFindString` with the match overlay. (done)
+- Status-bar link preview on both ports: GTK `mouse-target-changed`, Windows `mouseDidMoveOverElement`/`setStatusText`. (done)
+- Known gaps kept for later M5 items: downloads, zoom, fullscreen, permissions, certificate/auth, crash recovery (see [GAPS.md](GAPS.md)).
+
+## K1 — Kiwi browser
 
 - The product browser lives in the separate [Kiwi](https://github.com/mel0k1/Kiwi) repository; mustela-shell stays the engine's test harness.
 - Engine capabilities it consumes: stable settings API, privacy policy with per-site rules, profiles, packaging hooks.

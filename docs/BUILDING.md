@@ -89,13 +89,24 @@ A rule for a domain covers its subdomains (`example.org` matches `www.example.or
 | Ctrl+W | close tab |
 | Ctrl+L | focus the address bar |
 | Ctrl+H | history window |
+| Ctrl+F | find in page (Enter / Shift+Enter — next / previous match, Escape closes) |
 | Ctrl+Shift+Del | clear browsing data (cookies, cache, storage, IndexedDB) |
 | Ctrl+Shift+S | site rules window |
 | Ctrl+R / F5 | reload |
 | Alt+Left / Alt+Right | back / forward |
 | Escape | stop loading |
 
-Linux shortcuts apply to the GTK port. The Windows port shares Ctrl+T, Ctrl+W, Ctrl+L, Ctrl+R, F5, Ctrl+H, Ctrl+Shift+Del, Alt+Left and Alt+Right; Escape and Ctrl+Shift+S (site rules window) are GTK-only for now.
+Linux shortcuts apply to the GTK port. The Windows port shares Ctrl+T, Ctrl+W, Ctrl+L, Ctrl+R, F5, Ctrl+H, Ctrl+F, Ctrl+Shift+Del, Alt+Left and Alt+Right; Escape and Ctrl+Shift+S (site rules window) are GTK-only for now.
+
+## Popups, dialogs, find
+
+Links with `target=_blank` and `window.open` open as new tabs and inherit the originating tab's privacy mode: a popup from a private tab stays on the private (ephemeral) context or data store, and per-site policies are resolved for the popup URL like for any other tab. `window.close()` inside a popup closes its tab.
+
+`alert`, `confirm`, `prompt` and beforeunload confirmation show native dialogs (GTK message dialogs, Windows message boxes plus a modal prompt window). Text coming from the page is sanitized before display: control characters are stripped, line endings are normalized, and very long messages are cut on UTF-8 boundaries. Prompt cancellation returns an empty string.
+
+Find in page (Ctrl+F) searches case-insensitively with wrap-around, highlights all matches (GTK scrollbar marks and highlighting; Windows match overlay), shows the match count, and re-runs the current query when you switch tabs while the bar is open.
+
+Hovering a link shows its destination in the status bar on both ports.
 
 ## Tests
 
@@ -105,7 +116,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-`mustela_core_tests` covers settings round-trips (including partial files and fallbacks), privacy mapping and gating invariants, `host_from_uri` parsing, site-rule suffix matching and persistence, `resolve_site` precedence, history escaping/limits/dedup, fingerprint presets and referrer substitution, browsing-data kinds, URL normalization and the perf module (statistics, record codec, log trimming, `/proc` RSS parsing, budget and ceiling verdicts). It runs on every push in CI on both Linux and Windows.
+`mustela_core_tests` covers settings round-trips (including partial files and fallbacks), privacy mapping and gating invariants, `host_from_uri` parsing, site-rule suffix matching and persistence, `resolve_site` precedence, history escaping/limits/dedup, fingerprint presets and referrer substitution, browsing-data kinds, URL normalization, the perf module (statistics, record codec, log trimming, `/proc` RSS parsing, budget and ceiling verdicts) and the `ui_text` sanitization rules (control characters, CR/LF normalization, UTF-8-safe truncation for dialog text and find queries). It runs on every push in CI on both Linux and Windows.
 
 ## Benchmarks
 

@@ -18,6 +18,10 @@ The privacy core is one codebase; ports only translate it into WebKit calls. The
 | Per-site cookie denial | origin wipe on load | global accept policy only — the C API has no per-origin cookie wipe; noted as a known gap |
 | Clear browsing data | full kind mapping | cookies and storage; disk cache not reachable through the C API yet |
 | History, settings, sites, hot-reload | GFileMonitor | `ReadDirectoryChangesW` |
+| Popups and dialogs | related view inherits the ephemeral context; GTK message dialogs | new tab inherits the originator's data store; message boxes and a modal prompt |
+| UI text from the web | dialog bodies and find queries sanitized in the core (`ui_text`) before display | same |
+
+Popups are privacy-relevant by construction: a `target=_blank` tab opened from a private tab stays on the private (ephemeral) context or data store on both ports, and per-site policies are resolved for the popup URL exactly like for any other tab. Dialog text and find queries never pass raw from the page to the UI: `mustela::ui_text` strips control characters, normalizes line endings and caps length on UTF-8 boundaries before anything is shown.
 
 Everything above the translation layer — what counts as private, what gets recorded, what a site is allowed to do — is decided once, in the core, and both ports inherit it. New privacy switches land in the core first; ports follow.
 

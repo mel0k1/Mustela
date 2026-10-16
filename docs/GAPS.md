@@ -8,22 +8,22 @@ Every source file was re-read against two questions: does the engine expose this
 
 ## What exists today
 
-- Core: TOML settings, privacy policy with per-site rules, fingerprint budget, history, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log). 180-check test suite.
-- GTK shell: tabs, URL bar with search fallback, private toggle, history window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model.
-- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies).
+- Core: TOML settings, privacy policy with per-site rules, fingerprint budget, history, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log), `ui_text` sanitization for dialog text and find queries. 197-check test suite.
+- GTK shell: tabs, URL bar with search fallback, private toggle, history window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model, popups as tabs, native JS dialogs, find-in-page, status link preview.
+- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies), popups via `WKPageUIClient` V6, dialog listeners, `WKPageFindClient` find bar, link preview.
 - Bench: `mustela-bench` (GTK, runs in CI under xvfb) and `mustela-bench-win` (WinCairo, hidden host window; compiled in CI, executed on demand).
 - CI: three green tracks — Linux full build + tests + bench, Windows core tests, Windows shell and bench compile against 80 pinned upstream headers.
 
 ## Browsing platform gaps (priority 1)
 
-These are the capabilities a browser-shaped consumer (Kiwi) will need first. All of them are absent today.
+These are the capabilities a browser-shaped consumer (Kiwi) will need first. Popups, JS dialogs, find-in-page and status link preview shipped in M5; the rest are absent today.
 
 | Gap | Unused API surface | Notes |
 |---|---|---|
-| New windows and popups | GTK `create` signal; Win `didReceiveServerRedirectForProvisionalNavigation` aside, no `WKPageUIClient.createPage` | `target=_blank` links and `window.open` are silently dropped |
-| JavaScript dialogs | GTK `script-dialog` signal; Win `WKPageUIClient` (alert/confirm/prompt/beforeunload) | `alert()` is a no-op on both ports; beforeunload is ignored |
+| New windows and popups | ~~GTK `create` signal; Win `WKPageUIClient.createNewPage`~~ — done in M5 | `target=_blank` and `window.open` open as tabs; privacy context inherited from the originator |
+| JavaScript dialogs | ~~GTK `script-dialog`; Win `WKPageUIClient` alert/confirm/prompt/beforeunload~~ — done in M5 | Native dialogs with sanitized text on both ports |
 | Downloads | GTK `download-started`; Win `WKContextDownloadClient` | A download click does nothing today |
-| Find in page | GTK `find`/`found-text`; Win `WKPageFindClient` + `WKPageFindMatchesClient` | No Ctrl+F anywhere |
+| Find in page | ~~GTK `WebKitFindController`; Win `WKPageFindClient`~~ — done in M5 | Ctrl+F bar, next/previous, match counts, wrap-around |
 | Zoom | GTK `webkit_web_view_set_zoom_level`; Win `WKPageSetScaleFactor` | No UI or settings key |
 | Fullscreen | GTK `run-as-modal`; Win `WKPageFullScreenClient` | HTML5 fullscreen requests fail silently |
 | Context menu | GTK `context-menu` signal; Win `WKPageContextMenuClient` | Default menus appear (GTK) or nothing (Win); no Mustela items (open in private tab, copy link) |
@@ -31,7 +31,7 @@ These are the capabilities a browser-shaped consumer (Kiwi) will need first. All
 | Certificate and HTTP auth errors | GTK `accept-certificate` / `authenticate`; Win `didReceiveAuthenticationChallenge` | TLS failures just fail the load; no allow-once/allow-always decision, no credential prompt |
 | Web process crash | GTK `web-process-terminated`; Win `webProcessDidCrash` | A crashed tab shows a blank view; no reload affordance or event for Kiwi |
 | Session restore | (core) | Tabs are not persisted across restarts; no session file format in the core |
-| Status link preview | GTK `mouse-target-changed`; Win `WKPageStateClient` mouse-over | No hover URL feedback |
+| Status link preview | ~~GTK `mouse-target-changed`; Win `mouseDidMoveOverElement`/`setStatusText`~~ — done in M5 | Hover URL in the status bar on both ports |
 
 ## Privacy engine gaps (priority 2)
 
@@ -78,6 +78,10 @@ Leftovers from M4 plus what the bench variant opened up.
 | Disk cache clear | yes | no (C API limit) |
 | Startup budget, memory ceiling, process model | yes | yes |
 | Page-load timing, perf log | yes | yes |
+| Popups / target=_blank as tabs | yes | yes |
+| JS dialogs (alert/confirm/prompt/beforeunload) | yes | yes |
+| Find in page (Ctrl+F) | yes | yes |
+| Status link preview | yes | yes |
 | Bench | GTK, runs in CI | WinCairo, compile-checked in CI |
 
 ## Build and CI gaps
@@ -89,7 +93,7 @@ Leftovers from M4 plus what the bench variant opened up.
 
 ## Suggested order
 
-1. M5 — browsing platform basics: new windows/popups, JS dialogs, downloads, find-in-page, zoom, certificate/auth surface, crash recovery, permissions policy. Mostly port work with thin core additions (permission policy, session types).
+1. M5 — browsing platform basics: popups, JS dialogs and find-in-page shipped; the remaining items are downloads, zoom, certificate/auth surface, crash recovery, permissions policy. Mostly port work with thin core additions (permission policy, session types).
 2. M6 — privacy deepening: GPC, tracking-domain blocklist, secure DNS, public-suffix guard in site rules, settings load report.
 3. K1 — Kiwi consumes the declared public core surface (profiles, per-site policy UI) while the shell harness keeps parity work behind it.
 4. Ongoing: release/packaging job as soon as Windows runtime story settles.

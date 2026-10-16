@@ -4,7 +4,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-20-00599C)
-![status](https://img.shields.io/badge/status-M4_performance-e0a03d)
+![status](https://img.shields.io/badge/status-M5_browsing-basics-e0a03d)
 
 Privacy-first, cross-platform browser engine built on WebKit.
 
@@ -20,7 +20,9 @@ Existing engines force a trade-off between privacy, platform coverage and speed.
 
 ## Status
 
-`v0.8.1` — the bench went cross-platform. `mustela-bench-win` runs the same page-load benchmark on the WinCairo C API: a hidden host window with a non-persistent data store, identical CLI, JSON stats and budget exit code as the GTK bench; CI compile-checks it against pinned upstream WebKit headers on every push. The engine also got its second full gap review in [docs/GAPS.md](docs/GAPS.md) — browsing-platform gaps (popups, dialogs, downloads, find, permissions, certificates), privacy deepening candidates and the Kiwi API surface, prioritized.
+`v0.9.0` — the engine became a real browsing platform: popups and `target=_blank` open as tabs and inherit the originating tab's privacy mode, `alert`/`confirm`/`prompt`/beforeunload show native dialogs with sanitized text, find-in-page (Ctrl+F) works with match counts and wrap-around on both ports, and hovering a link shows its destination in the status bar. The GTK port drives it through `create`/`script-dialog`/`WebKitFindController`; the Windows port through `WKPageUIClient` V6 and `WKPageFindClient`. Dialog text and find queries pass through a new `ui_text` core module (control-character stripping, CR/LF normalization, UTF-8-safe truncation), covered by the now 197-check suite.
+
+`v0.8.1` added the cross-platform bench: `mustela-bench-win` runs the same page-load benchmark on the WinCairo C API — a hidden host window with a non-persistent data store, identical CLI, JSON stats and budget exit codes; CI compile-checks it against pinned upstream WebKit headers on every push. The engine also got its second full gap review in [docs/GAPS.md](docs/GAPS.md).
 
 The v0.7 Windows port remains the base: `src/shell/win/` embeds the upstream WinCairo flavor of WebKit through its C API — tabs, URL bar with search fallback, persistent profile under `%APPDATA%\mustela`, private tabs on non-persistent data stores, cookie accept policy, ITP, hardening switches, the full fingerprint budget (user scripts plus a compiled content filter), history, clear-browsing-data and settings hot-reload — and the v0.6 privacy core (cookie policy, ITP, hardening, per-site overrides, fingerprint budget, hot-reload) keeps resolving everything through `PrivacyPolicy` in the core.
 
@@ -54,12 +56,12 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The suite covers settings round-trips, privacy gating invariants, site-rule matching, history escaping, fingerprint presets, browsing-data kinds, URL normalization and the perf module (statistics, record codec, budgets). On Linux the full GTK shell and `mustela-bench` are built in the same run, and the bench loads the local fixture under xvfb; on Windows, CI additionally compiles `shell_win.cpp` and `bench_win.cpp` against pinned upstream WebKit C API headers.
+The suite covers settings round-trips, privacy gating invariants, site-rule matching, history escaping, fingerprint presets, browsing-data kinds, URL normalization, the perf module (statistics, record codec, budgets) and the ui-text sanitization rules. On Linux the full GTK shell and `mustela-bench` are built in the same run, and the bench loads the local fixture under xvfb; on Windows, CI additionally compiles `shell_win.cpp` and `bench_win.cpp` against pinned upstream WebKit C API headers.
 
 ## Layout
 
 ```
-src/core/        settings, privacy policy, site rules, fingerprint budget, browsing-data kinds, url normalization (portable, no UI deps)
+src/core/        settings, privacy policy, site rules, fingerprint budget, browsing-data kinds, url normalization, ui-text sanitization (portable, no UI deps)
 src/shell/       embedder shell, one directory per port
 src/shell/gtk/   Linux port (WebKitGTK)
 src/shell/win/   Windows port (WinCairo over the WebKit C API)
