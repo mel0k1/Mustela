@@ -34,7 +34,9 @@ add_library(mustela_core STATIC
     src/core/blocklist.cpp
     src/core/doh.cpp
     src/core/proxy_server.cpp
-    src/core/session.cpp)
+    src/core/session.cpp
+    src/core/bookmarks.cpp
+    src/core/error_page.cpp)
 target_include_directories(mustela_core PUBLIC src src/core)
 target_link_libraries(mustela_core PUBLIC mustela_warnings)
 

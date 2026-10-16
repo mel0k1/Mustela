@@ -20,8 +20,10 @@
 
 #include "browsing_data.hpp"
 #include "blocklist.hpp"
+#include "bookmarks.hpp"
 #include "config.hpp"
 #include "doh.hpp"
+#include "error_page.hpp"
 #include "fingerprint.hpp"
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
@@ -108,6 +110,7 @@ void test_settings_roundtrip() {
     original.permissions_notifications = "ask";
     original.tls_strict = false;
     original.session_restore = false;
+    original.devtools = false;
     original.gpc = false;
     original.blocklist = false;
     original.blocklist_file = "/tmp/trackers.list";
@@ -146,6 +149,7 @@ void test_settings_roundtrip() {
     CHECK_STR(loaded.permissions_notifications, "ask");
     CHECK(!loaded.tls_strict);
     CHECK(!loaded.session_restore);
+    CHECK(!loaded.devtools);
     CHECK(!loaded.gpc);
     CHECK(!loaded.blocklist);
     CHECK_STR(loaded.blocklist_file, "/tmp/trackers.list");
@@ -1390,6 +1394,77 @@ void test_proxy_server_loopback() {
     raw_origin.stop();
 }
 
+void test_bookmarks_store() {
+    std::string path = temp_path("bookmarks.tsv");
+    {
+        mustela::BookmarkStore store(path);
+        CHECK(store.entries().empty());
+        CHECK(!store.contains("https://mustela.example/"));
+        CHECK(!store.remove("https://mustela.example/"));
+        CHECK(!store.add("", "no url", 300));
+        CHECK(store.add("https://mustela.example/", "Mustela", 100));
+        CHECK(store.add("https://webkit.example/x", "WebKit", 200));
+        CHECK(store.contains("https://mustela.example/"));
+        CHECK(store.contains("https://webkit.example/x"));
+        CHECK(!store.contains("https://other.example/"));
+        CHECK(store.add("https://mustela.example/", "Mustela 2", 400));
+        CHECK(store.entries().size() == 2);
+        CHECK_STR(store.entries()[0].url, "https://mustela.example/");
+        CHECK_STR(store.entries()[0].title, "Mustela 2");
+        CHECK(store.entries()[0].added_at == 400);
+        CHECK_STR(store.entries()[1].url, "https://webkit.example/x");
+        CHECK(store.remove("https://webkit.example/x"));
+        CHECK(!store.remove("https://webkit.example/x"));
+        CHECK(store.entries().size() == 1);
+    }
+    mustela::BookmarkStore reloaded(path);
+    CHECK(reloaded.entries().size() == 1);
+    CHECK_STR(reloaded.entries()[0].url, "https://mustela.example/");
+    CHECK_STR(reloaded.entries()[0].title, "Mustela 2");
+    CHECK(reloaded.entries()[0].added_at == 400);
+
+    std::string escaped_path = temp_path("bookmarks_esc.tsv");
+    {
+        mustela::BookmarkStore store(escaped_path);
+        CHECK(store.add("https://tab.example/a\tb", "title\twith\ttabs\nand newline", 500));
+    }
+    mustela::BookmarkStore roundtrip(escaped_path);
+    CHECK(roundtrip.entries().size() == 1);
+    CHECK_STR(roundtrip.entries()[0].url, "https://tab.example/a\tb");
+    CHECK_STR(roundtrip.entries()[0].title, "title\twith\ttabs\nand newline");
+    CHECK(roundtrip.entries()[0].added_at == 500);
+}
+
+void test_error_page() {
+    std::string page = mustela::branded_error_page("Could not connect", "host not found",
+        "https://ok.example/path?a=1&b=<2>");
+    CHECK(page.rfind("<!doctype html>", 0) == 0);
+    CHECK(page.find("Mustela") != std::string::npos);
+    CHECK(page.find("Could not connect") != std::string::npos);
+    CHECK(page.find("host not found") != std::string::npos);
+    CHECK(page.find("Try again") != std::string::npos);
+    CHECK(page.find("a=1&amp;b=&lt;2&gt;") != std::string::npos);
+    CHECK(page.find("<script") == std::string::npos);
+    CHECK(page.find("no-referrer") != std::string::npos);
+
+    std::string blank = mustela::branded_error_page("", "", "");
+    CHECK(blank.rfind("<!doctype html>", 0) == 0);
+    CHECK(blank.find("mst-url") == std::string::npos);
+    CHECK(blank.find("Try again") == std::string::npos);
+
+    std::string hostile = mustela::branded_error_page("<img src=x onerror=alert(1)>", "\x01ctrl\x02",
+        "https://h.example/\"onclick=\"x");
+    CHECK(hostile.find("<img src=x") == std::string::npos);
+    CHECK(hostile.find("&lt;img") != std::string::npos);
+    CHECK(hostile.find("&quot;onclick=") != std::string::npos);
+    CHECK(hostile.find("\x01") == std::string::npos);
+
+    std::string long_input(10000, 'x');
+    std::string capped = mustela::branded_error_page(long_input, long_input, "https://" + long_input + ".example/");
+    CHECK(capped.size() < 8192);
+    CHECK(capped.find("Try again") != std::string::npos);
+}
+
 int main() {
     test_settings_roundtrip();
     test_settings_partial_file();
@@ -1415,6 +1490,8 @@ int main() {
     test_proxy_urls();
     test_doh_resolver();
     test_proxy_server_loopback();
+    test_bookmarks_store();
+    test_error_page();
 
     if (failures > 0) {
         std::fprintf(stderr, "%d/%d checks failed\n", failures, checks);

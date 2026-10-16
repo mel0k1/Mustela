@@ -49,6 +49,7 @@ struct Settings {
     std::string permissions_notifications = "deny";
     bool tls_strict = true;
     bool session_restore = true;
+    bool devtools = true;
     bool gpc = true;
     bool blocklist = true;
     std::string blocklist_file;

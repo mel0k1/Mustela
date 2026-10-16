@@ -257,6 +257,7 @@ Settings load_settings(const std::string& path, SettingsReport& report) {
         permission_value(pairs, "permissions.notifications", settings.permissions_notifications, &report);
     apply(pairs, "security.tls_strict", settings.tls_strict, &report);
     apply(pairs, "shell.session_restore", settings.session_restore, &report);
+    apply(pairs, "shell.devtools", settings.devtools, &report);
     apply(pairs, "privacy.gpc", settings.gpc, &report);
     apply(pairs, "privacy.blocklist", settings.blocklist, &report);
     apply(pairs, "privacy.blocklist_file", settings.blocklist_file, &report);
@@ -284,6 +285,7 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "window_height = " << settings.window_height << "\n";
     out << "zoom = " << clamp_zoom(settings.zoom_default) << "\n";
     out << "session_restore = " << (settings.session_restore ? "true" : "false") << "\n";
+    out << "devtools = " << (settings.devtools ? "true" : "false") << "\n";
     out << "\n[privacy]\n";
     out << "private_tabs_enabled = " << (settings.private_tabs_enabled ? "true" : "false") << "\n";
     out << "start_in_private = " << (settings.start_in_private ? "true" : "false") << "\n";
