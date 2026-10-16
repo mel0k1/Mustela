@@ -1710,13 +1710,29 @@ void open_site_rules_window(Browser& b) {
     gtk_widget_show_all(window);
 }
 
+void report_settings_issues(const mustela::SettingsReport& report) {
+    if (report.unknown_keys.empty() && report.invalid_values.empty() && report.warnings.empty()) return;
+    g_print("mustela: settings %s\n", report.summary().c_str());
+    for (const std::string& key : report.unknown_keys) {
+        g_print("mustela: unknown settings key %s\n", key.c_str());
+    }
+    for (const std::string& item : report.invalid_values) {
+        g_print("mustela: invalid settings value for %s\n", item.c_str());
+    }
+    for (const std::string& item : report.warnings) {
+        g_print("mustela: %s\n", item.c_str());
+    }
+}
+
 gboolean do_settings_reload(gpointer) {
     if (!browser) return G_SOURCE_REMOVE;
     Browser& b = *browser;
     b.settings_reload_pending = 0;
 
     gchar* path = g_build_filename(g_get_user_config_dir(), "mustela", "settings.toml", nullptr);
-    b.settings = mustela::load_settings(path);
+    mustela::SettingsReport report;
+    b.settings = mustela::load_settings(path, report);
+    report_settings_issues(report);
     g_free(path);
     b.privacy = mustela::privacy_from(b.settings);
 
@@ -1790,7 +1806,9 @@ int mustela_main(int argc, char** argv) {
     gchar* config_dir = g_build_filename(g_get_user_config_dir(), "mustela", nullptr);
     g_mkdir_with_parents(config_dir, 0700);
     gchar* config_path = g_build_filename(config_dir, "settings.toml", nullptr);
-    browser->settings = mustela::load_settings(config_path);
+    mustela::SettingsReport settings_report;
+    browser->settings = mustela::load_settings(config_path, settings_report);
+    report_settings_issues(settings_report);
     if (!g_file_test(config_path, G_FILE_TEST_EXISTS)) {
         mustela::save_settings(config_path, browser->settings);
     }
