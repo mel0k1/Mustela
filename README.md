@@ -4,7 +4,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-20-00599C)
-![status](https://img.shields.io/badge/status-M5_browsing-basics-e0a03d)
+![status](https://img.shields.io/badge/status-M9_browsing_dressing-e0a03d)
 
 Privacy-first, cross-platform browser engine built on WebKit.
 
@@ -19,6 +19,8 @@ Existing engines force a trade-off between privacy, platform coverage and speed.
 - **Lean performance.** A thin embedder over WebKit: no bundled services, no background traffic, minimal startup cost.
 
 ## Status
+
+`v0.13.0` closes M9, the browser dressing: devtools open with Ctrl+Shift+I / F12 on both ports (GTK toggles the WebKit inspector through `webkit_web_view_get_inspector` with `shell.devtools` as the switch, Windows shows it through `WKPageGetInspector` + `WKPageShowWebInspectorForTesting`); failed main-frame loads render Mustela-branded error pages instead of WebKit's stock page — heading, detail and failing URL come from the core (`error_page.hpp`), HTML-escaped with a Try-again action; bookmarks live in a core store (`bookmarks.tsv` in the profile, `BookmarkStore`) with a toolbar star (Ctrl+D) and a bookmarks window (Ctrl+Shift+O) on both ports; GTK tabs show site favicons from the WebKit favicon database, persisted as PNGs under the profile. The suite is now 513 checks.
 
 `v0.10.0` closes M6: Global Privacy Control (`privacy.gpc`) sends the `Sec-GPC` header through a GTK web-process extension and exposes `navigator.globalPrivacyControl` on both ports; a ~60-domain tracker blocklist (`privacy.blocklist`, optional `privacy.blocklist_file`) compiles into content filters on both ports; context menus are Mustela-built on both ports (navigation, link/image/media, editing sections by hit-test); F11 toggles window fullscreen and HTML5 element fullscreen works on GTK; session restore reopens tabs after a restart — full back/forward history on GTK, tab URLs on Windows (`shell.session_restore`). The core grew a DoH codec (RFC 8484) as secure-DNS groundwork while neither WebKit flavor exposes a resolver hook yet; the suite is now 322 checks.
 

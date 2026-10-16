@@ -8,9 +8,9 @@ Every source file was re-read against two questions: does the engine expose this
 
 ## What exists today
 
-- Core: TOML settings with a load report (schema version, applied/unknown/invalid key accounting), privacy policy with per-site rules, permission policy with per-site grants, fingerprint budget, tracking blocklist, DoH wire codec, DoH resolver and local proxy engine, bundled public-suffix list guarding site rules, session store, history, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log), `ui_text` sanitization for dialog text, find queries and download names. 468-check test suite.
-- GTK shell: tabs, URL bar with search fallback, private toggle, history window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model, popups as tabs, native JS dialogs, find-in-page, status link preview, downloads, zoom, permission prompts, TLS certificate prompt, HTTP auth prompt, crash recovery, Mustela context menu, fullscreen (F11 + HTML5), session restore, GPC script, tracker blocklist filter, engine routing through the local proxy (blocking + DoH + upstream).
-- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies), popups via `WKPageUIClient` V6, dialog listeners, `WKPageFindClient` find bar, link preview, downloads, zoom, permission prompts, HTTP auth prompt, crash recovery, Mustela context menu, F11 fullscreen, session restore, GPC script, tracker blocklist filter, engine routing through the local proxy via environment variables (WinHTTP DoH transport).
+- Core: TOML settings with a load report (schema version, applied/unknown/invalid key accounting), privacy policy with per-site rules, permission policy with per-site grants, fingerprint budget, tracking blocklist, DoH wire codec, DoH resolver and local proxy engine, bundled public-suffix list guarding site rules, session store, history, bookmark store, branded error-page builder, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log), `ui_text` sanitization for dialog text, find queries and download names. 513-check test suite.
+- GTK shell: tabs (with favicons), URL bar with search fallback, private toggle, history window, bookmarks window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model, popups as tabs, native JS dialogs, find-in-page, status link preview, downloads, zoom, permission prompts, TLS certificate prompt, HTTP auth prompt, crash recovery, Mustela context menu, fullscreen (F11 + HTML5), session restore, GPC script, tracker blocklist filter, engine routing through the local proxy (blocking + DoH + upstream), devtools, branded error pages.
+- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies) and favicons (no C API surface), popups via `WKPageUIClient` V6, dialog listeners, `WKPageFindClient` find bar, link preview, downloads, zoom, permission prompts, HTTP auth prompt, crash recovery, Mustela context menu, F11 fullscreen, session restore, GPC script, tracker blocklist filter, engine routing through the local proxy via environment variables (WinHTTP DoH transport), devtools, branded error pages, bookmarks.
 - Bench: `mustela-bench` (GTK, runs in CI under xvfb) and `mustela-bench-win` (WinCairo, hidden host window; compiled in CI, executed on demand).
 - CI: three green tracks — Linux full build + tests + bench, Windows core tests, Windows shell and bench compile against 88 pinned upstream headers.
 
@@ -20,13 +20,13 @@ The web platform itself is not the gap: rendering, CSS, JavaScript, media, stora
 
 **Browser features (user-visible):**
 
-- Bookmarks. Nothing in the core or either shell; this is browser-side data (no WebKit API involved). Needs a core store (`bookmarks.{hpp,cpp}` in the session/history style) plus UI on both ports. (core + ports)
-- Favicons. GTK carries `webkit_web_context_get_favicon_database` and `webkit_web_context_set_favicon_database_directory` — both unused; the WinCairo C API has no favicon surface. History and tabs render text only. (port, GTK-first)
-- Devtools / Web Inspector. GTK `webkit_web_view_get_inspector` is unused; the pinned WinCairo headers do export `WKPageGetInspector` (`WKPage.h`) — an inspector surface exists on both ports and is wired nowhere. Cheapest big-feature win available. (ports)
+- ~~Bookmarks.~~ Nothing in the core or either shell... — done in M9: `bookmarks.hpp` ships a `BookmarkStore` (TSV, escaped fields, URL de-duplication) with a toolbar star (Ctrl+D) and a bookmarks window (Ctrl+Shift+O) on both ports. (core + ports)
+- ~~Favicons.~~ GTK carries `webkit_web_context_get_favicon_database`... — done in M9 on GTK: the favicon database is enabled per profile, tabs show icons through `notify::favicon`, and non-private tabs persist them as PNGs under the profile; the WinCairo C API has no favicon surface, so Windows stays text-only. (port, GTK-only)
+- ~~Devtools / Web Inspector.~~ — done in M9: GTK toggles the inspector through `webkit_web_view_get_inspector` (Ctrl+Shift+I/F12, `shell.devtools` switch); Windows shows it through `WKPageGetInspector` + `WKPageShowWebInspectorForTesting` (one-way — the pin has no `WKInspectorShow`/`IsVisible`). (ports)
+- ~~Branded error pages.~~ — done in M9: the core builds the page (`error_page.hpp`, sanitized + HTML-escaped heading/detail/URL with a Try-again action), GTK loads it with `webkit_web_view_load_alternate_html`, Windows with `WKPageLoadHTMLString`; cancellations are skipped and the error page itself never reaches history/perf. (core + ports)
 - Printing. GTK `WebKitPrintOperation` is unused; the pinned WinCairo C API has no print surface. (port, GTK-only today)
 - Save page and screenshots. GTK `webkit_web_view_save_to_file` (MHTML) and `webkit_web_view_get_snapshot` are unused; the pinned WinCairo headers lack `WKPageGetSnapshot`. (port, GTK-only today)
 - Spellchecking. GTK `webkit_web_context_set_spell_checking_enabled`/`_languages` are unused; WinCairo has no text-checker client in the pin. (port, GTK-only today)
-- Branded error pages. `load-failed` only cancels the loading state; WebKit's stock error page renders. `webkit_web_view_load_alternate_html` (GTK) and an HTML-string load on the Win C API would give both ports Mustela-branded error pages with a retry action. (ports)
 - Web notification display. The GTK shell resolves the `notifications` permission but never handles `webkit_notification` — an allowed notification is silent. Either wire it to GNotification or keep auto-deny and document it. Win already auto-denies (no C API decision call). (port)
 - Download pause/resume. No resume surface on either port (GTK 4.1 has none; `WKDownloadResume` is absent from the pin). Accepted limitation. (ports, upstream-dependent)
 - Drag and drop. No DnD wiring: links, text selections and tab reordering rely on keyboard/pointer paths only. (ports)
@@ -121,6 +121,10 @@ Leftovers from M4 plus what the bench variant opened up.
 | Fullscreen (F11) | yes | yes |
 | HTML5 element fullscreen | yes | no (C API limit; GTK signals only) |
 | Mustela context menu | yes | yes |
+| Devtools (Web Inspector) | yes (toggle) | yes (show) |
+| Branded error pages | yes | yes |
+| Bookmarks (star + window) | yes | yes |
+| Favicons in tabs | yes | no (C API limit) |
 | Session restore | yes (full history) | yes (tab URLs) |
 | GPC (Sec-GPC header + JS) | yes (web extension) | JS only (no C API header surface) |
 | Tracker blocklist | yes | yes |
@@ -140,6 +144,7 @@ Leftovers from M4 plus what the bench variant opened up.
 2. M6 — privacy deepening: shipped — GPC (JS both ports, Sec-GPC header on GTK via a web extension), tracking-domain blocklist compiled into content filters on both ports, DoH wire codec + setting in the core, fullscreen, Mustela context menus and session restore on both ports; leftovers (public-suffix guard, settings load report) closed in M8.
 3. M7 — local proxy network layer: shipped — loopback proxy engine in the core (CONNECT tunneling, request-level and connection-level blocklist enforcement, upstream chaining, DoH resolver with injected transport), GTK routing through `WebKitNetworkProxySettings`, Windows routing through the curl proxy environment, 386-check suite with loopback integration tests.
 4. M8 — settings hygiene and suffix guard: shipped — bundled public-suffix list with a `sites.toml` guard (load skips, save refuses, lookup stops at the effective top level) and a `SettingsReport` load report (schema version, applied/unknown/invalid keys) surfaced by both shells; 468-check suite.
-5. M9 candidates from the third review, cheapest first: devtools via `WKPageGetInspector` + `webkit_web_view_get_inspector` (both ports, one API each), branded error pages, web notification display on GTK, favicons on GTK, bookmarks store in the core. Full-PSL data file and the K1 public surface remain the strategic items.
-6. K1 — Kiwi consumes the declared public core surface (profiles, per-site policy UI) while the shell harness keeps parity work behind it.
-7. Ongoing: release/packaging job as soon as Windows runtime story settles.
+5. M9 — browser dressing: shipped — devtools on both ports (`shell.devtools`, toggle on GTK, show on Windows), branded error pages built by the core and rendered through `load_alternate_html`/`WKPageLoadHTMLString`, a core `BookmarkStore` with toolbar star and bookmarks window on both ports, favicons on GTK through the favicon database; 513-check suite.
+6. Remaining third-review candidates: web notification display on GTK, full-PSL data file, printing and save/screenshot (GTK-only), and the K1 public surface as the strategic item.
+7. K1 — Kiwi consumes the declared public core surface (profiles, per-site policy UI) while the shell harness keeps parity work behind it.
+8. Ongoing: release/packaging job as soon as Windows runtime story settles.

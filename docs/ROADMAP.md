@@ -110,6 +110,15 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 - Settings load report in the core (`SettingsReport`): `load_settings` reports the schema `version` (a file written by a newer engine warns), applied/unknown/invalid key counts and the offending keys themselves; `save_settings` stamps `version = 1`; GTK prints issues on stdout, Windows through the debug output — on startup and on every hot-reload. (done)
 - Test suite 386 → 468 checks: PSL matching (exact, wildcard, exception, unlisted TLD, IP and localhost cases), the site-rules guard (load skip, set refusal, save round-trip) and the load report (unknown keys, invalid values, version warning, clean round-trip, missing file). (done)
 
+## M9 — Browser dressing (done)
+
+- Devtools on both ports: Ctrl+Shift+I / F12 toggles the Web Inspector — GTK through `webkit_web_view_get_inspector` (`show`/`close` via `webkit_web_inspector_is_attached`), Windows through `WKPageGetInspector` + `WKPageShowWebInspectorForTesting` (show-only in the pinned C API — close the inspector window itself); `shell.devtools` (on by default) drives `enable-developer-extras` / `WKPreferencesSetDeveloperExtrasEnabled` and re-applies on hot-reload. (done)
+- Branded error pages on both ports: failed main-frame loads render a Mustela-styled page instead of WebKit's stock error page. The core builds the HTML (`error_page.hpp` — heading, detail, failing URL, all sanitized and HTML-escaped, plus a Try-again action that re-navigates the failing URL); GTK fills the failed load through `webkit_web_view_load_alternate_html`, Windows through `WKPageLoadHTMLString`; cancellations are skipped, and the tab skips history/perf recording for the error page itself. (done)
+- Bookmarks in the core (`bookmarks.hpp`): a `BookmarkStore` in the session/history style — TSV file with escaped fields in the profile, `add`/`remove`/`contains` with URL de-duplication and title refresh; unit-tested including a persistence round-trip. (done)
+- Bookmarks UI on both ports: toolbar star that reflects the current tab (Ctrl+D toggles, click toggles) and a bookmarks window (Ctrl+Shift+O) with open on double-click, open and remove actions — GTK tree view, Windows list box; private tabs may bookmark but bookmarks are the user's explicit data. (done)
+- Favicons on GTK: the profile enables the WebKit favicon database (`webkit_web_context_set_favicon_database_directory`), tabs show the site icon through `notify::favicon` + `webkit_web_view_get_favicon`, and non-private tabs persist it as a PNG under `profiles/default/favicons/<host>.png`. (done, GTK-only)
+- Honest limits: the pinned WinCairo C API exposes no favicon surface, so Windows tabs and history stay text-only (tracked in [GAPS.md](GAPS.md)); on Windows the inspector is one-way (no `WKInspectorShow`/`IsVisible` in the pin); reloading an error page keeps history silent for that retry.
+
 ## K1 — Kiwi browser
 
 - The product browser lives in the separate [Kiwi](https://github.com/mel0k1/Kiwi) repository; mustela-shell stays the engine's test harness.

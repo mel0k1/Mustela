@@ -43,6 +43,7 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | shell.window_height | 800 | window height, updated on exit |
 | shell.zoom | 1.0 | default zoom for new tabs, 0.3–3.0 (Ctrl+plus/minus/0 changes the active tab) |
 | shell.session_restore | true | reopen the previous session's tabs on start (normal tabs only) |
+| shell.devtools | true | enable the Web Inspector (Ctrl+Shift+I / F12) |
 | downloads.dir | (empty) | download destination; empty means the platform Downloads folder |
 | downloads.mode | auto | `auto` saves without asking, `ask` opens a save dialog per download |
 | permissions.geolocation | deny | `deny`, `ask` or `allow` for location requests |
