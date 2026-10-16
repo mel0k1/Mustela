@@ -4,6 +4,7 @@
 #include <psapi.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
+#include <winhttp.h>
 
 #include <atomic>
 #include <cstdint>
@@ -23,6 +24,7 @@
 #include "perf.hpp"
 #include "permissions.hpp"
 #include "privacy.hpp"
+#include "proxy_server.hpp"
 #include "session.hpp"
 #include "site_rules.hpp"
 #include "ui_text.hpp"
@@ -287,6 +289,7 @@ struct Browser {
     WKUserContentExtensionStoreRef filter_store = nullptr;
     WKUserContentFilterRef fonts_filter = nullptr;
     WKUserContentFilterRef blocklist_filter = nullptr;
+    std::unique_ptr<mustela::ProxyServer> proxy;
     std::string session_file;
     bool fullscreen_active = false;
     WINDOWPLACEMENT saved_placement = {};
@@ -2068,6 +2071,101 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
     }
 }
 
+bool doh_transport_winhttp(const std::string& url, const std::vector<unsigned char>& query,
+    std::vector<unsigned char>& answer) {
+    std::wstring wide_url = to_wide(url);
+    URL_COMPONENTSW parts = {};
+    parts.dwStructSize = sizeof(parts);
+    wchar_t host[256] = {};
+    wchar_t path[1024] = {};
+    parts.lpszHostName = host;
+    parts.dwHostNameLength = 255;
+    parts.lpszUrlPath = path;
+    parts.dwUrlPathLength = 1023;
+    if (!WinHttpCrackUrl(wide_url.c_str(), static_cast<DWORD>(wide_url.size()), 0, &parts)) return false;
+    HINTERNET session = WinHttpOpen(L"Mustela-DoH/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return false;
+    WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
+    HINTERNET connection = WinHttpConnect(session, host, parts.nPort, 0);
+    HINTERNET request = nullptr;
+    bool ok = false;
+    if (connection) {
+        request = WinHttpOpenRequest(connection, L"POST", path, nullptr, WINHTTP_NO_REFERER,
+            WINHTTP_DEFAULT_ACCEPT_TYPES,
+            parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
+    }
+    if (request) {
+        const wchar_t* headers = L"Content-Type: application/dns-message\r\n";
+        if (WinHttpSendRequest(request, headers, static_cast<DWORD>(wcslen(headers)),
+                static_cast<LPVOID>(const_cast<unsigned char*>(query.data())),
+                static_cast<DWORD>(query.size()), static_cast<DWORD>(query.size()), 0) &&
+            WinHttpReceiveResponse(request, nullptr)) {
+            DWORD status = 0;
+            DWORD status_size = sizeof(status);
+            if (WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size, WINHTTP_NO_HEADER_INDEX) &&
+                status == 200) {
+                std::vector<unsigned char> data;
+                for (;;) {
+                    DWORD available = 0;
+                    if (!WinHttpQueryDataAvailable(request, &available) || available == 0) break;
+                    if (data.size() + available > 65536) break;
+                    size_t offset = data.size();
+                    data.resize(offset + available);
+                    DWORD read = 0;
+                    if (!WinHttpReadData(request, data.data() + offset, available, &read) || read == 0) {
+                        data.resize(offset);
+                        break;
+                    }
+                    data.resize(offset + read);
+                }
+                if (!data.empty()) {
+                    answer = std::move(data);
+                    ok = true;
+                }
+            }
+        }
+    }
+    if (request) WinHttpCloseHandle(request);
+    if (connection) WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    return ok;
+}
+
+void configure_proxy(Browser& b) {
+    _putenv_s("http_proxy", "");
+    _putenv_s("https_proxy", "");
+    _putenv_s("no_proxy", "localhost,127.0.0.1,::1");
+    if (b.settings.proxy_mode == "local") {
+        mustela::Blocklist list = mustela::default_blocklist(b.settings.blocklist_file);
+        if (!b.privacy.blocklist) list.clear();
+        mustela::ProxyConfig config;
+        config.resolve_via_doh = !b.settings.dns_over_https.empty();
+        config.doh_url = b.settings.dns_over_https;
+        mustela::ProxyEndpoint endpoint;
+        if (!b.settings.proxy_upstream.empty() && mustela::parse_proxy_url(b.settings.proxy_upstream, endpoint)) {
+            config.has_upstream = true;
+            config.upstream = endpoint;
+        }
+        b.proxy = std::make_unique<mustela::ProxyServer>();
+        if (b.proxy->start(config, list, doh_transport_winhttp)) {
+            std::string url = "http://127.0.0.1:" + std::to_string(b.proxy->port());
+            _putenv_s("http_proxy", url.c_str());
+            _putenv_s("https_proxy", url.c_str());
+        } else {
+            b.proxy.reset();
+        }
+    } else if (b.settings.proxy_mode == "upstream") {
+        mustela::ProxyEndpoint endpoint;
+        if (mustela::parse_proxy_url(b.settings.proxy_upstream, endpoint)) {
+            std::string url = mustela::proxy_url_from(endpoint);
+            _putenv_s("http_proxy", url.c_str());
+            _putenv_s("https_proxy", url.c_str());
+        }
+    }
+}
+
 }
 
 int mustela_main(int argc, char** argv) {
@@ -2101,6 +2199,7 @@ int mustela_main(int argc, char** argv) {
     b.sites->load();
     b.history = std::make_unique<mustela::HistoryStore>(profile_path("history.tsv"));
     b.perf = std::make_unique<mustela::PerfLog>(profile_path("perf.jsonl"));
+    configure_proxy(b);
 
     WkHold context_configuration(WKContextConfigurationCreate());
     b.context = WKContextCreateWithConfiguration(static_cast<WKContextConfigurationRef>(context_configuration.ref));
