@@ -22,6 +22,7 @@ public:
     void set_label(GtkWidget* label) { label_ = label; }
     bool is_private() const { return private_; }
     TabPrivacy privacy() const { return private_ ? TabPrivacy::Private : TabPrivacy::Normal; }
+    int crashes = 0;
     LoadTimer load;
 
     std::string uri() const;

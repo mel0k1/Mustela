@@ -8,6 +8,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -18,6 +19,7 @@
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
 #include "perf.hpp"
+#include "permissions.hpp"
 #include "privacy.hpp"
 #include "site_rules.hpp"
 #include "tab.hpp"
@@ -32,10 +34,17 @@ using mustela::CookiePolicy;
 using mustela::DataKind;
 using mustela::FingerprintPolicy;
 using mustela::Hardening;
+using mustela::PermissionDecision;
 using mustela::PrivacyPolicy;
 using mustela::Settings;
+using mustela::SiteRule;
 using mustela::Tab;
 using mustela::TabPrivacy;
+
+struct DownloadState {
+    std::string name;
+    double progress = 0;
+};
 
 struct Browser {
     Settings settings;
@@ -72,6 +81,7 @@ struct Browser {
     bool memory_over = false;
     bool startup_marked = false;
     double startup_entry_ms = 0;
+    std::map<WebKitDownload*, DownloadState> downloads;
     std::vector<std::unique_ptr<Tab>> tabs;
 };
 
@@ -238,6 +248,17 @@ void refresh_status(Browser& b) {
     if (b.memory_over) {
         text += " · mem " + std::to_string(static_cast<int>(b.memory_bytes / (1024 * 1024))) + " MB";
     }
+    if (!b.downloads.empty()) {
+        std::string line;
+        if (b.downloads.size() == 1) {
+            const DownloadState& state = b.downloads.begin()->second;
+            line = "↓ " + state.name + " "
+                + std::to_string(static_cast<int>(state.progress * 100.0)) + "%";
+        } else {
+            line = "↓ " + std::to_string(b.downloads.size()) + " downloads";
+        }
+        text = line + " · " + text;
+    }
     gtk_label_set_text(GTK_LABEL(b.status_label), text.c_str());
 }
 
@@ -266,6 +287,38 @@ void flash_status(const char* text) {
     if (!browser->status_label) return;
     gtk_label_set_text(GTK_LABEL(browser->status_label), text);
     g_timeout_add_seconds(3, restore_status, nullptr);
+}
+
+const double zoom_steps[] = {0.3, 0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
+
+double zoom_next(double current, int direction) {
+    const size_t count = sizeof(zoom_steps) / sizeof(zoom_steps[0]);
+    if (direction > 0) {
+        for (size_t i = 0; i < count; ++i) {
+            if (zoom_steps[i] > current + 0.001) return zoom_steps[i];
+        }
+        return zoom_steps[count - 1];
+    }
+    if (direction < 0) {
+        for (size_t i = count; i > 0; --i) {
+            if (zoom_steps[i - 1] < current - 0.001) return zoom_steps[i - 1];
+        }
+        return zoom_steps[0];
+    }
+    return 1.0;
+}
+
+void apply_tls_policy(Browser& b) {
+    WebKitTLSErrorsPolicy policy = b.settings.tls_strict
+        ? WEBKIT_TLS_ERRORS_POLICY_FAIL
+        : WEBKIT_TLS_ERRORS_POLICY_IGNORE;
+    WebKitWebsiteDataManager* managers[] = {
+        webkit_web_context_get_website_data_manager(b.normal_context),
+        webkit_web_context_get_website_data_manager(b.private_context)
+    };
+    for (WebKitWebsiteDataManager* manager : managers) {
+        webkit_website_data_manager_set_tls_errors_policy(manager, policy);
+    }
 }
 
 void apply_cookie_policy(WebKitWebContext* context, CookiePolicy policy) {
@@ -390,6 +443,105 @@ void deny_origin_cookies(Browser& b, const std::string& uri) {
     g_list_free(origins);
 }
 
+std::string download_directory(Browser& b) {
+    if (!b.settings.downloads_dir.empty()) return b.settings.downloads_dir;
+    const gchar* special = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
+    if (special && *special) return special;
+    const gchar* home = g_get_home_dir();
+    return home ? std::string(home) + "/Downloads" : std::string(".");
+}
+
+std::string download_path(const std::string& dir, const std::string& name) {
+    std::string path = dir + "/" + name;
+    if (!g_file_test(path.c_str(), G_FILE_TEST_EXISTS)) return path;
+    std::string base = name;
+    std::string ext;
+    size_t dot = name.rfind('.');
+    if (dot != std::string::npos && dot != 0) {
+        base = name.substr(0, dot);
+        ext = name.substr(dot);
+    }
+    for (int n = 2; n < 1000; ++n) {
+        std::string candidate = dir + "/" + base + " (" + std::to_string(n) + ")" + ext;
+        if (!g_file_test(candidate.c_str(), G_FILE_TEST_EXISTS)) return candidate;
+    }
+    return path;
+}
+
+void on_download_progress(GObject* object, GParamSpec*, gpointer) {
+    Browser& b = *browser;
+    auto it = b.downloads.find(WEBKIT_DOWNLOAD(object));
+    if (it == b.downloads.end()) return;
+    it->second.progress = webkit_download_get_estimated_progress(WEBKIT_DOWNLOAD(object));
+    if (b.hover_link.empty()) refresh_status(b);
+}
+
+void on_download_failed(WebKitDownload* download, GError*, gpointer) {
+    Browser& b = *browser;
+    auto it = b.downloads.find(download);
+    std::string name = it != b.downloads.end() ? it->second.name : std::string();
+    if (it != b.downloads.end()) b.downloads.erase(it);
+    g_object_unref(download);
+    flash_status(("download failed" + (name.empty() ? std::string() : ": " + name)).c_str());
+}
+
+void on_download_finished(WebKitDownload* download, gpointer) {
+    Browser& b = *browser;
+    auto it = b.downloads.find(download);
+    std::string name = it != b.downloads.end() ? it->second.name : std::string();
+    if (it != b.downloads.end()) b.downloads.erase(it);
+    g_object_unref(download);
+    flash_status(("download finished: " + name).c_str());
+}
+
+void on_download_started(WebKitWebContext*, WebKitDownload* download, gpointer) {
+    Browser& b = *browser;
+    WebKitURIResponse* response = webkit_download_get_response(download);
+    const gchar* suggested = response ? webkit_uri_response_get_suggested_filename(response) : nullptr;
+    std::string name = mustela::sanitize_filename(suggested && *suggested ? suggested : "download");
+    std::string dir = download_directory(b);
+    std::string path;
+
+    if (b.settings.downloads_mode == "ask") {
+        GtkWidget* chooser = gtk_file_chooser_dialog_new("Save download — Mustela", GTK_WINDOW(b.window),
+            GTK_FILE_CHOOSER_ACTION_SAVE, "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, nullptr);
+        gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(chooser), name.c_str());
+        gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(chooser), dir.c_str());
+        gint choice = gtk_dialog_run(GTK_DIALOG(chooser));
+        if (choice == GTK_RESPONSE_ACCEPT) {
+            gchar* chosen = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
+            if (chosen) path = chosen;
+            g_free(chosen);
+        }
+        gtk_widget_destroy(chooser);
+        if (path.empty()) {
+            webkit_download_cancel(download);
+            return;
+        }
+    } else {
+        path = download_path(dir, name);
+    }
+
+    gchar* uri = g_filename_to_uri(path.c_str(), nullptr, nullptr);
+    if (!uri) {
+        webkit_download_cancel(download);
+        return;
+    }
+    webkit_download_set_destination(download, uri);
+    g_free(uri);
+
+    std::string shown = path;
+    size_t slash = shown.rfind('/');
+    if (slash != std::string::npos) shown = shown.substr(slash + 1);
+
+    g_object_ref(download);
+    b.downloads[download] = DownloadState{shown, 0};
+    g_signal_connect(download, "notify::estimated-progress", G_CALLBACK(on_download_progress), nullptr);
+    g_signal_connect(download, "failed", G_CALLBACK(on_download_failed), nullptr);
+    g_signal_connect(download, "finished", G_CALLBACK(on_download_finished), nullptr);
+    flash_status(("downloading " + shown).c_str());
+}
+
 void on_destroy(GtkWidget*, gpointer) {
     if (browser) {
         gint width = 0;
@@ -461,6 +613,25 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
         show_find_bar(b, TRUE);
         return TRUE;
     }
+    if (mods == GDK_CONTROL_MASK && (event->keyval == GDK_KEY_plus || event->keyval == GDK_KEY_equal
+        || event->keyval == GDK_KEY_KP_Add)) {
+        if (tab) {
+            double level = webkit_web_view_get_zoom_level(tab->view());
+            webkit_web_view_set_zoom_level(tab->view(), zoom_next(level, 1));
+        }
+        return TRUE;
+    }
+    if (mods == GDK_CONTROL_MASK && (event->keyval == GDK_KEY_minus || event->keyval == GDK_KEY_KP_Subtract)) {
+        if (tab) {
+            double level = webkit_web_view_get_zoom_level(tab->view());
+            webkit_web_view_set_zoom_level(tab->view(), zoom_next(level, -1));
+        }
+        return TRUE;
+    }
+    if (mods == GDK_CONTROL_MASK && (event->keyval == GDK_KEY_0 || event->keyval == GDK_KEY_KP_0)) {
+        if (tab) webkit_web_view_set_zoom_level(tab->view(), 1.0);
+        return TRUE;
+    }
     if (mods == 0 && event->keyval == GDK_KEY_Escape) {
         if (b.find_bar && gtk_widget_get_visible(b.find_bar)) {
             show_find_bar(b, FALSE);
@@ -501,6 +672,7 @@ void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_d
     }
     if (event == WEBKIT_LOAD_FINISHED) {
         gtk_entry_set_progress_fraction(GTK_ENTRY(browser->url_entry), 0.0);
+        tab->crashes = 0;
         double elapsed = tab->load.stop(mustela::Stopwatch::now_ms());
         if (elapsed >= 0.0 && !tab->uri().empty()) {
             record_perf(*browser, "pageload", elapsed, 0, tab->uri());
@@ -636,6 +808,7 @@ GtkWidget* on_view_create(WebKitWebView* view, WebKitNavigationAction* action, g
     bool priv = origin ? origin->is_private() : b.privacy.default_private == TabPrivacy::Private;
     WebKitWebView* related = WEBKIT_WEB_VIEW(webkit_web_view_new_with_related_view(view));
     harden_view(related, b.privacy.hardening);
+    webkit_web_view_set_zoom_level(related, b.settings.zoom_default);
     WebKitURIRequest* request = webkit_navigation_action_get_request(action);
     const gchar* target = request ? webkit_uri_request_get_uri(request) : nullptr;
     apply_view_policy(b, related, target ? target : "");
@@ -659,6 +832,183 @@ void on_view_ready_to_show(WebKitWebView* view, gpointer) {
 
 void on_view_close(WebKitWebView*, gpointer user_data) {
     close_tab(*browser, static_cast<Tab*>(user_data));
+}
+
+enum PermResponse {
+    PERM_ALLOW = 1,
+    PERM_DENY,
+    PERM_ALWAYS,
+    PERM_NEVER
+};
+
+std::string stricter_permission(const std::string& first, const std::string& second) {
+    if (first == "deny" || second == "deny") return "deny";
+    if (first == "ask" || second == "ask") return "ask";
+    return "allow";
+}
+
+gboolean on_permission_request(WebKitWebView*, WebKitPermissionRequest* request, gpointer user_data) {
+    Browser& b = *browser;
+    Tab* tab = static_cast<Tab*>(user_data);
+    const std::string* setting = nullptr;
+    std::string what;
+    std::string combined;
+    if (WEBKIT_IS_GEOLOCATION_PERMISSION_REQUEST(request)) {
+        what = "your location";
+        setting = &b.settings.permissions_geolocation;
+    } else if (WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(request)) {
+        WebKitUserMediaPermissionRequest* media = WEBKIT_USER_MEDIA_PERMISSION_REQUEST(request);
+        bool audio = webkit_user_media_permission_is_for_audio_device(media) != FALSE;
+        bool video = webkit_user_media_permission_is_for_video_device(media) != FALSE;
+        bool display = webkit_user_media_permission_is_for_display_device(media) != FALSE;
+        if (display) {
+            what = "your screen";
+            setting = &b.settings.permissions_camera;
+        } else if (audio && video) {
+            what = "camera and microphone";
+            combined = stricter_permission(b.settings.permissions_camera, b.settings.permissions_microphone);
+            setting = &combined;
+        } else if (video) {
+            what = "camera";
+            setting = &b.settings.permissions_camera;
+        } else {
+            what = "microphone";
+            setting = &b.settings.permissions_microphone;
+        }
+    } else if (WEBKIT_IS_NOTIFICATION_PERMISSION_REQUEST(request)) {
+        what = "notifications";
+        setting = &b.settings.permissions_notifications;
+    } else {
+        webkit_permission_request_deny(request);
+        return TRUE;
+    }
+
+    std::string host = tab ? mustela::host_from_uri(tab->uri()) : std::string();
+    if (host.empty()) host = "this site";
+    mustela::PermissionChoice global = mustela::permission_choice_from(*setting);
+    mustela::SiteRule rule = b.sites ? b.sites->policy_for(host).permissions : mustela::SiteRule::Default;
+    PermissionDecision decision = mustela::resolve_permission(global, rule);
+    if (decision == PermissionDecision::Denied) {
+        webkit_permission_request_deny(request);
+        return TRUE;
+    }
+    if (decision == PermissionDecision::Granted) {
+        webkit_permission_request_allow(request);
+        return TRUE;
+    }
+
+    GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(b.window), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "%s wants to use %s", host.c_str(), what.c_str());
+    gtk_window_set_title(GTK_WINDOW(dialog), "Permission — Mustela");
+    gtk_dialog_add_buttons(GTK_DIALOG(dialog),
+        "Allow", PERM_ALLOW,
+        "Deny", PERM_DENY,
+        "Always allow", PERM_ALWAYS,
+        "Never allow", PERM_NEVER,
+        nullptr);
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+
+    if (response == PERM_ALLOW) {
+        webkit_permission_request_allow(request);
+        return TRUE;
+    }
+    if (response == PERM_DENY) {
+        webkit_permission_request_deny(request);
+        return TRUE;
+    }
+    if (response == PERM_ALWAYS || response == PERM_NEVER) {
+        if (response == PERM_ALWAYS) webkit_permission_request_allow(request);
+        else webkit_permission_request_deny(request);
+        if (b.sites && tab && !tab->is_private()) {
+            const mustela::SitePolicy* existing = b.sites->find(host);
+            mustela::SitePolicy policy = existing ? *existing : mustela::SitePolicy{};
+            policy.permissions = response == PERM_ALWAYS ? SiteRule::Allow : SiteRule::Deny;
+            b.sites->set(host, policy);
+            b.sites->save();
+            flash_status(("permission saved for " + host).c_str());
+        }
+        return TRUE;
+    }
+    webkit_permission_request_deny(request);
+    return TRUE;
+}
+
+gboolean on_accept_certificate(WebKitWebView*, GTlsCertificate*, GTlsCertificateFlags, gpointer user_data) {
+    Tab* tab = static_cast<Tab*>(user_data);
+    std::string host = tab ? mustela::host_from_uri(tab->uri()) : std::string();
+    if (host.empty()) host = "this site";
+    std::string message = "The certificate for " + host + " is invalid. Continue anyway?";
+    GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(browser->window), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO, "%s", message.c_str());
+    gtk_window_set_title(GTK_WINDOW(dialog), "Invalid certificate — Mustela");
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    return response == GTK_RESPONSE_YES ? TRUE : FALSE;
+}
+
+gboolean on_authenticate(WebKitWebView*, WebKitAuthenticationRequest* request, gpointer) {
+    Browser& b = *browser;
+    const gchar* host = webkit_authentication_request_get_host(request);
+    const gchar* realm = webkit_authentication_request_get_realm(request);
+    guint port = webkit_authentication_request_get_port(request);
+    bool proxy = webkit_authentication_request_is_for_proxy(request) != FALSE;
+    std::string label = std::string(proxy ? "proxy " : "") + (host ? host : "") + ":"
+        + std::to_string(static_cast<int>(port));
+    if (realm && *realm) label += std::string(" (") + mustela::sanitize_dialog_text(realm, 256) + ")";
+
+    GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(b.window), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_QUESTION, GTK_BUTTONS_OK_CANCEL, "%s", ("Sign in to " + label).c_str());
+    gtk_window_set_title(GTK_WINDOW(dialog), "Authentication — Mustela");
+    GtkWidget* user_entry = gtk_entry_new();
+    GtkWidget* pass_entry = gtk_entry_new();
+    gtk_entry_set_visibility(GTK_ENTRY(pass_entry), FALSE);
+    gtk_entry_set_activates_default(GTK_ENTRY(user_entry), TRUE);
+    gtk_entry_set_activates_default(GTK_ENTRY(pass_entry), TRUE);
+    gtk_widget_set_margin_start(user_entry, 12);
+    gtk_widget_set_margin_end(user_entry, 12);
+    gtk_widget_set_margin_bottom(user_entry, 6);
+    gtk_widget_set_margin_start(pass_entry, 12);
+    gtk_widget_set_margin_end(pass_entry, 12);
+    gtk_widget_set_margin_bottom(pass_entry, 6);
+    WebKitCredential* proposed = webkit_authentication_request_get_proposed_credential(request);
+    if (proposed) {
+        const gchar* name = webkit_credential_get_username(proposed);
+        gtk_entry_set_text(GTK_ENTRY(user_entry), name ? name : "");
+    }
+    GtkWidget* area = gtk_message_dialog_get_message_area(GTK_MESSAGE_DIALOG(dialog));
+    gtk_box_pack_start(GTK_BOX(area), user_entry, FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(area), pass_entry, FALSE, FALSE, 4);
+    gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
+    gtk_widget_show_all(dialog);
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    std::string user = gtk_entry_get_text(GTK_ENTRY(user_entry));
+    std::string pass = gtk_entry_get_text(GTK_ENTRY(pass_entry));
+    gtk_widget_destroy(dialog);
+    if (response == GTK_RESPONSE_OK) {
+        WebKitCredential* credential = webkit_credential_new(user.c_str(), pass.c_str(),
+            WEBKIT_CREDENTIAL_PERSISTENCE_FOR_SESSION);
+        webkit_authentication_request_authenticate(request, credential);
+        webkit_credential_free(credential);
+    } else {
+        webkit_authentication_request_cancel(request);
+    }
+    return TRUE;
+}
+
+void on_web_process_terminated(WebKitWebView*, WebKitWebProcessTerminationReason reason, gpointer user_data) {
+    Tab* tab = static_cast<Tab*>(user_data);
+    if (tab) ++tab->crashes;
+    const char* why = "crashed";
+    if (reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT) why = "ran out of memory";
+    else if (reason == WEBKIT_WEB_PROCESS_TERMINATED_BY_API) why = "was stopped";
+    std::string text = std::string("web process ") + why;
+    if (tab && tab->crashes <= 2) {
+        webkit_web_view_reload(tab->view());
+        flash_status((text + " — reloading").c_str());
+    } else {
+        flash_status((text + " — Ctrl+R to reload").c_str());
+    }
 }
 
 void on_view_mouse_target_changed(WebKitWebView*, WebKitHitTestResult* hit_test, guint, gpointer user_data) {
@@ -765,6 +1115,10 @@ void connect_tab_signals(Tab* tab) {
     g_signal_connect(tab->view(), "close", G_CALLBACK(on_view_close), tab);
     g_signal_connect(tab->view(), "script-dialog", G_CALLBACK(on_script_dialog), nullptr);
     g_signal_connect(tab->view(), "mouse-target-changed", G_CALLBACK(on_view_mouse_target_changed), tab);
+    g_signal_connect(tab->view(), "permission-request", G_CALLBACK(on_permission_request), tab);
+    g_signal_connect(tab->view(), "accept-certificate", G_CALLBACK(on_accept_certificate), tab);
+    g_signal_connect(tab->view(), "authenticate", G_CALLBACK(on_authenticate), nullptr);
+    g_signal_connect(tab->view(), "web-process-terminated", G_CALLBACK(on_web_process_terminated), tab);
     WebKitFindController* finder = webkit_web_view_get_find_controller(tab->view());
     g_signal_connect(finder, "found-text", G_CALLBACK(on_find_found_text), tab);
     g_signal_connect(finder, "failed-to-find-text", G_CALLBACK(on_find_failed), tab);
@@ -809,6 +1163,7 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     WebKitWebContext* context = priv ? b.private_context : b.normal_context;
     WebKitWebView* view = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(context));
     harden_view(view, b.privacy.hardening);
+    webkit_web_view_set_zoom_level(view, b.settings.zoom_default);
     apply_view_policy(b, view, url ? url : "");
     Tab* tab = new Tab(view, priv);
     tab->set_label(build_tab_label(b, tab));
@@ -921,7 +1276,8 @@ enum RuleCols {
     COL_HOST,
     COL_JS,
     COL_COOKIES,
-    COL_FP
+    COL_FP,
+    COL_PERM
 };
 
 enum RuleAction {
@@ -933,6 +1289,9 @@ enum RuleAction {
     RULE_FP_EXEMPT,
     RULE_FP_STRICT,
     RULE_FP_DEFAULT,
+    RULE_PERM_ALLOW,
+    RULE_PERM_DENY,
+    RULE_PERM_DEFAULT,
     RULE_REMOVE
 };
 
@@ -946,7 +1305,8 @@ void reload_rules_model(GtkListStore* store) {
             COL_HOST, entry.host.c_str(),
             COL_JS, mustela::site_rule_name(entry.policy.javascript),
             COL_COOKIES, mustela::site_rule_name(entry.policy.cookies),
-            COL_FP, mustela::site_rule_name(entry.policy.fingerprint), -1);
+            COL_FP, mustela::site_rule_name(entry.policy.fingerprint),
+            COL_PERM, mustela::site_rule_name(entry.policy.permissions), -1);
     }
 }
 
@@ -987,6 +1347,9 @@ void on_rule_action(GtkButton*, gpointer user_data) {
             case RULE_FP_EXEMPT: policy.fingerprint = mustela::SiteRule::Allow; break;
             case RULE_FP_STRICT: policy.fingerprint = mustela::SiteRule::Deny; break;
             case RULE_FP_DEFAULT: policy.fingerprint = mustela::SiteRule::Default; break;
+            case RULE_PERM_ALLOW: policy.permissions = mustela::SiteRule::Allow; break;
+            case RULE_PERM_DENY: policy.permissions = mustela::SiteRule::Deny; break;
+            case RULE_PERM_DEFAULT: policy.permissions = mustela::SiteRule::Default; break;
             default: break;
         }
         b.sites->set(host, policy);
@@ -1017,7 +1380,7 @@ void open_site_rules_window(Browser& b) {
     gtk_window_set_transient_for(GTK_WINDOW(window), GTK_WINDOW(b.window));
     g_signal_connect(window, "destroy", G_CALLBACK(on_rules_window_destroy), nullptr);
 
-    GtkListStore* store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkListStore* store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     b.rules_store = store;
     reload_rules_model(store);
 
@@ -1032,6 +1395,7 @@ void open_site_rules_window(Browser& b) {
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "JavaScript", renderer, "text", COL_JS, nullptr);
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Cookies", renderer, "text", COL_COOKIES, nullptr);
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Fingerprint", renderer, "text", COL_FP, nullptr);
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Permissions", renderer, "text", COL_PERM, nullptr);
     gtk_tree_view_column_set_expand(gtk_tree_view_get_column(GTK_TREE_VIEW(tree), COL_HOST), TRUE);
 
     GtkWidget* scroll = gtk_scrolled_window_new(nullptr, nullptr);
@@ -1051,6 +1415,9 @@ void open_site_rules_window(Browser& b) {
         {"Fingerprint exempt", RULE_FP_EXEMPT},
         {"Fingerprint strict", RULE_FP_STRICT},
         {"Fingerprint default", RULE_FP_DEFAULT},
+        {"Permissions always", RULE_PERM_ALLOW},
+        {"Permissions never", RULE_PERM_DENY},
+        {"Permissions default", RULE_PERM_DEFAULT},
         {"Remove", RULE_REMOVE}
     };
 
@@ -1063,7 +1430,7 @@ void open_site_rules_window(Browser& b) {
         GtkWidget* btn = gtk_button_new_with_label(buttons[i].label);
         g_signal_connect(btn, "clicked", G_CALLBACK(on_rule_action),
             reinterpret_cast<gpointer>(static_cast<std::intptr_t>(buttons[i].action)));
-        gtk_box_pack_start(GTK_BOX(rows[i < 5 ? 0 : 1]), btn, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(rows[i < 6 ? 0 : 1]), btn, FALSE, FALSE, 0);
     }
 
     GtkWidget* hint = gtk_label_new("no selection = current site");
@@ -1094,6 +1461,7 @@ gboolean do_settings_reload(gpointer) {
     apply_cookie_policy(b.normal_context, b.privacy.cookies);
     WebKitWebsiteDataManager* manager = webkit_web_context_get_website_data_manager(b.normal_context);
     webkit_website_data_manager_set_itp_enabled(manager, b.privacy.hardening.tracking_prevention ? TRUE : FALSE);
+    apply_tls_policy(b);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(b.private_toggle), b.privacy.default_private == TabPrivacy::Private);
 
     if (b.privacy.history_enabled && !b.history) {
@@ -1208,6 +1576,9 @@ int mustela_main(int argc, char** argv) {
     apply_process_model(browser->private_context, browser->settings.process_model);
     apply_cookie_policy(browser->normal_context, browser->privacy.cookies);
     apply_cookie_policy(browser->private_context, browser->privacy.cookies);
+    apply_tls_policy(*browser);
+    g_signal_connect(browser->normal_context, "download-started", G_CALLBACK(on_download_started), nullptr);
+    g_signal_connect(browser->private_context, "download-started", G_CALLBACK(on_download_started), nullptr);
 
     const char* url = nullptr;
     bool start_private = false;
