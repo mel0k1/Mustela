@@ -16,6 +16,7 @@ struct SitePolicy {
     SiteRule javascript = SiteRule::Default;
     SiteRule cookies = SiteRule::Default;
     SiteRule fingerprint = SiteRule::Default;
+    SiteRule permissions = SiteRule::Default;
 };
 
 const char* site_rule_name(SiteRule rule);

@@ -10,6 +10,7 @@
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
 #include "perf.hpp"
+#include "permissions.hpp"
 #include "privacy.hpp"
 #include "site_rules.hpp"
 #include "ui_text.hpp"
@@ -79,6 +80,14 @@ void test_settings_roundtrip() {
     original.startup_budget_ms = 2500;
     original.memory_ceiling_mb = 2048;
     original.perf_log = false;
+    original.downloads_dir = "/tmp/dl";
+    original.downloads_mode = "ask";
+    original.zoom_default = 1.5;
+    original.permissions_geolocation = "ask";
+    original.permissions_camera = "allow";
+    original.permissions_microphone = "deny";
+    original.permissions_notifications = "ask";
+    original.tls_strict = false;
 
     mustela::save_settings(path, original);
     mustela::Settings loaded = mustela::load_settings(path);
@@ -104,6 +113,14 @@ void test_settings_roundtrip() {
     CHECK(loaded.startup_budget_ms == 2500);
     CHECK(loaded.memory_ceiling_mb == 2048);
     CHECK(!loaded.perf_log);
+    CHECK_STR(loaded.downloads_dir, "/tmp/dl");
+    CHECK_STR(loaded.downloads_mode, "ask");
+    CHECK(loaded.zoom_default == 1.5);
+    CHECK_STR(loaded.permissions_geolocation, "ask");
+    CHECK_STR(loaded.permissions_camera, "allow");
+    CHECK_STR(loaded.permissions_microphone, "deny");
+    CHECK_STR(loaded.permissions_notifications, "ask");
+    CHECK(!loaded.tls_strict);
 
     mustela::Settings fallback = mustela::load_settings(path + "_missing");
     CHECK_STR(fallback.homepage, "https://example.org");
@@ -115,6 +132,25 @@ void test_settings_roundtrip() {
     CHECK(fallback.startup_budget_ms == 0);
     CHECK(fallback.memory_ceiling_mb == 0);
     CHECK(fallback.perf_log);
+    CHECK(fallback.downloads_dir.empty());
+    CHECK_STR(fallback.downloads_mode, "auto");
+    CHECK(fallback.zoom_default == 1.0);
+    CHECK_STR(fallback.permissions_geolocation, "deny");
+    CHECK_STR(fallback.permissions_camera, "deny");
+    CHECK_STR(fallback.permissions_notifications, "deny");
+    CHECK(fallback.tls_strict);
+
+    std::string invalid = write_temp("invalid.toml",
+        "[shell]\n"
+        "zoom = 12\n"
+        "[downloads]\n"
+        "mode = prompt\n"
+        "[permissions]\n"
+        "camera = maybe\n");
+    mustela::Settings clamped = mustela::load_settings(invalid);
+    CHECK(clamped.zoom_default == 3.0);
+    CHECK_STR(clamped.downloads_mode, "auto");
+    CHECK_STR(clamped.permissions_camera, "deny");
 }
 
 void test_settings_partial_file() {
@@ -440,6 +476,57 @@ void test_perf_module() {
     CHECK(timer.stop(5.0) < 0.0);
 }
 
+void test_permissions() {
+    CHECK(mustela::permission_choice_from("deny") == mustela::PermissionChoice::Deny);
+    CHECK(mustela::permission_choice_from("ask") == mustela::PermissionChoice::Ask);
+    CHECK(mustela::permission_choice_from("allow") == mustela::PermissionChoice::Allow);
+    CHECK(mustela::permission_choice_from("bogus") == mustela::PermissionChoice::Deny);
+    CHECK(mustela::permission_choice_from("") == mustela::PermissionChoice::Deny);
+    CHECK_STR(mustela::permission_choice_name(mustela::PermissionChoice::Ask), "ask");
+    CHECK_STR(mustela::permission_choice_name(mustela::PermissionChoice::Allow), "allow");
+    CHECK_STR(mustela::permission_choice_name(mustela::PermissionChoice::Deny), "deny");
+
+    CHECK(mustela::resolve_permission(mustela::PermissionChoice::Deny, mustela::SiteRule::Default)
+        == mustela::PermissionDecision::Denied);
+    CHECK(mustela::resolve_permission(mustela::PermissionChoice::Ask, mustela::SiteRule::Default)
+        == mustela::PermissionDecision::Prompt);
+    CHECK(mustela::resolve_permission(mustela::PermissionChoice::Allow, mustela::SiteRule::Default)
+        == mustela::PermissionDecision::Granted);
+    CHECK(mustela::resolve_permission(mustela::PermissionChoice::Deny, mustela::SiteRule::Allow)
+        == mustela::PermissionDecision::Granted);
+    CHECK(mustela::resolve_permission(mustela::PermissionChoice::Allow, mustela::SiteRule::Deny)
+        == mustela::PermissionDecision::Denied);
+    CHECK(mustela::resolve_permission(mustela::PermissionChoice::Ask, mustela::SiteRule::Deny)
+        == mustela::PermissionDecision::Denied);
+    CHECK(mustela::resolve_permission(mustela::PermissionChoice::Ask, mustela::SiteRule::Allow)
+        == mustela::PermissionDecision::Granted);
+}
+
+void test_site_rules_permissions() {
+    std::string path = temp_path("site-permissions.toml");
+    mustela::SiteRules rules(path);
+    mustela::SitePolicy policy;
+    policy.permissions = mustela::SiteRule::Allow;
+    rules.set("trusted.example", policy);
+    CHECK(rules.policy_for("trusted.example").permissions == mustela::SiteRule::Allow);
+    CHECK(rules.entries().size() == 1);
+    rules.save();
+
+    mustela::SiteRules reloaded(path);
+    reloaded.load();
+    CHECK(reloaded.policy_for("trusted.example").permissions == mustela::SiteRule::Allow);
+
+    mustela::SitePolicy denied = reloaded.policy_for("trusted.example");
+    denied.permissions = mustela::SiteRule::Deny;
+    reloaded.set("trusted.example", denied);
+    CHECK(reloaded.policy_for("trusted.example").permissions == mustela::SiteRule::Deny);
+
+    mustela::SitePolicy cleared = reloaded.policy_for("trusted.example");
+    cleared.permissions = mustela::SiteRule::Default;
+    reloaded.set("trusted.example", cleared);
+    CHECK(reloaded.entries().empty());
+}
+
 void test_ui_text() {
     CHECK_STR(mustela::sanitize_dialog_text("hello"), "hello");
     CHECK_STR(mustela::sanitize_dialog_text(""), "");
@@ -471,6 +558,18 @@ void test_ui_text() {
     }
     CHECK(valid_utf8);
     CHECK(mustela::sanitize_find_query("abcdef", 3).size() == 3);
+
+    CHECK_STR(mustela::sanitize_filename("report.pdf"), "report.pdf");
+    CHECK_STR(mustela::sanitize_filename("../../etc/passwd"), "etcpasswd");
+    CHECK_STR(mustela::sanitize_filename("a/b\\c.txt"), "abc.txt");
+    CHECK_STR(mustela::sanitize_filename(std::string("a\x01" "b\x7F" "c.txt")), "abc.txt");
+    CHECK_STR(mustela::sanitize_filename("..hidden.."), "hidden");
+    CHECK_STR(mustela::sanitize_filename("..."), "download");
+    CHECK_STR(mustela::sanitize_filename(""), "download");
+    CHECK_STR(mustela::sanitize_filename("  "), "download");
+    std::string cut_name = mustela::sanitize_filename(cyrillic, 6);
+    CHECK_STR(cut_name, std::string("\xD0\xBF\xD1\x80\xD0\xB8"));
+    CHECK_STR(mustela::sanitize_filename("abcdef", 4), "abcd");
 }
 
 }
@@ -488,6 +587,8 @@ int main() {
     test_normalize_url();
     test_perf_module();
     test_ui_text();
+    test_permissions();
+    test_site_rules_permissions();
 
     if (failures > 0) {
         std::fprintf(stderr, "%d/%d checks failed\n", failures, checks);

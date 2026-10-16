@@ -26,6 +26,14 @@ struct Settings {
     int startup_budget_ms = 0;
     int memory_ceiling_mb = 0;
     bool perf_log = true;
+    std::string downloads_dir;
+    std::string downloads_mode = "auto";
+    double zoom_default = 1.0;
+    std::string permissions_geolocation = "deny";
+    std::string permissions_camera = "deny";
+    std::string permissions_microphone = "deny";
+    std::string permissions_notifications = "deny";
+    bool tls_strict = true;
 };
 
 Settings load_settings(const std::string& path);

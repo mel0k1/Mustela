@@ -28,6 +28,13 @@ int to_int(const std::string& value, int fallback) {
     return static_cast<int>(parsed);
 }
 
+double to_double(const std::string& value, double fallback) {
+    char* end = nullptr;
+    double parsed = std::strtod(value.c_str(), &end);
+    if (end == value.c_str()) return fallback;
+    return parsed;
+}
+
 std::map<std::string, std::string> parse_toml_subset(const std::string& path) {
     std::map<std::string, std::string> pairs;
     std::ifstream in(path);
@@ -81,6 +88,35 @@ void apply(const std::map<std::string, std::string>& pairs, const std::string& k
     if (it != pairs.end()) target = to_bool(it->second, target);
 }
 
+void apply(const std::map<std::string, std::string>& pairs, const std::string& key, double& target) {
+    auto it = pairs.find(key);
+    if (it != pairs.end()) target = to_double(it->second, target);
+}
+
+double clamp_zoom(double zoom) {
+    if (zoom < 0.3) return 0.3;
+    if (zoom > 3.0) return 3.0;
+    return zoom;
+}
+
+std::string permission_value(const std::map<std::string, std::string>& pairs, const std::string& key,
+    const std::string& fallback) {
+    auto it = pairs.find(key);
+    if (it == pairs.end()) return fallback;
+    const std::string& value = it->second;
+    if (value == "deny" || value == "ask" || value == "allow") return value;
+    return fallback;
+}
+
+std::string downloads_mode_value(const std::map<std::string, std::string>& pairs, const std::string& key,
+    const std::string& fallback) {
+    auto it = pairs.find(key);
+    if (it == pairs.end()) return fallback;
+    const std::string& value = it->second;
+    if (value == "auto" || value == "ask") return value;
+    return fallback;
+}
+
 }
 
 Settings load_settings(const std::string& path) {
@@ -108,6 +144,16 @@ Settings load_settings(const std::string& path) {
     apply(pairs, "perf.startup_budget_ms", settings.startup_budget_ms);
     apply(pairs, "perf.memory_ceiling_mb", settings.memory_ceiling_mb);
     apply(pairs, "perf.log", settings.perf_log);
+    apply(pairs, "downloads.dir", settings.downloads_dir);
+    settings.downloads_mode = downloads_mode_value(pairs, "downloads.mode", settings.downloads_mode);
+    double zoom = settings.zoom_default;
+    apply(pairs, "shell.zoom", zoom);
+    settings.zoom_default = clamp_zoom(zoom);
+    settings.permissions_geolocation = permission_value(pairs, "permissions.geolocation", settings.permissions_geolocation);
+    settings.permissions_camera = permission_value(pairs, "permissions.camera", settings.permissions_camera);
+    settings.permissions_microphone = permission_value(pairs, "permissions.microphone", settings.permissions_microphone);
+    settings.permissions_notifications = permission_value(pairs, "permissions.notifications", settings.permissions_notifications);
+    apply(pairs, "security.tls_strict", settings.tls_strict);
     return settings;
 }
 
@@ -120,6 +166,7 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "search_template = \"" << settings.search_template << "\"\n";
     out << "window_width = " << settings.window_width << "\n";
     out << "window_height = " << settings.window_height << "\n";
+    out << "zoom = " << clamp_zoom(settings.zoom_default) << "\n";
     out << "\n[privacy]\n";
     out << "private_tabs_enabled = " << (settings.private_tabs_enabled ? "true" : "false") << "\n";
     out << "start_in_private = " << (settings.start_in_private ? "true" : "false") << "\n";
@@ -139,6 +186,16 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "startup_budget_ms = " << settings.startup_budget_ms << "\n";
     out << "memory_ceiling_mb = " << settings.memory_ceiling_mb << "\n";
     out << "log = " << (settings.perf_log ? "true" : "false") << "\n";
+    out << "\n[downloads]\n";
+    out << "dir = \"" << settings.downloads_dir << "\"\n";
+    out << "mode = \"" << settings.downloads_mode << "\"\n";
+    out << "\n[permissions]\n";
+    out << "geolocation = \"" << settings.permissions_geolocation << "\"\n";
+    out << "camera = \"" << settings.permissions_camera << "\"\n";
+    out << "microphone = \"" << settings.permissions_microphone << "\"\n";
+    out << "notifications = \"" << settings.permissions_notifications << "\"\n";
+    out << "\n[security]\n";
+    out << "tls_strict = " << (settings.tls_strict ? "true" : "false") << "\n";
 }
 
 }

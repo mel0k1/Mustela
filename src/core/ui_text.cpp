@@ -61,4 +61,25 @@ std::string sanitize_find_query(const std::string& query, size_t max_bytes) {
     return clean;
 }
 
+std::string sanitize_filename(const std::string& name, size_t max_bytes) {
+    std::string clean;
+    clean.reserve(name.size() < max_bytes ? name.size() : max_bytes);
+    for (size_t i = 0; i < name.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(name[i]);
+        if (is_dropped_control(c) || c == '/' || c == '\\') continue;
+        clean += static_cast<char>(c);
+    }
+    size_t begin = clean.find_first_not_of(". ");
+    if (begin == std::string::npos) return "download";
+    size_t end = clean.find_last_not_of(". ");
+    clean = clean.substr(begin, end - begin + 1);
+    if (clean.empty()) return "download";
+    if (clean.size() > max_bytes) {
+        clean.resize(utf8_floor(clean, max_bytes));
+        while (!clean.empty() && (clean.back() == '.' || clean.back() == ' ')) clean.pop_back();
+        if (clean.empty()) return "download";
+    }
+    return clean;
+}
+
 }

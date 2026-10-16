@@ -93,6 +93,7 @@ void SiteRules::load() {
         if (key == "javascript") rules_[host].javascript = site_rule_from(value);
         if (key == "cookies") rules_[host].cookies = site_rule_from(value);
         if (key == "fingerprint") rules_[host].fingerprint = site_rule_from(value);
+        if (key == "permissions") rules_[host].permissions = site_rule_from(value);
     }
 }
 
@@ -102,7 +103,7 @@ void SiteRules::save() const {
 
     for (const auto& [host, policy] : rules_) {
         if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
-            && policy.fingerprint == SiteRule::Default) continue;
+            && policy.fingerprint == SiteRule::Default && policy.permissions == SiteRule::Default) continue;
         out << "[" << host << "]\n";
         if (policy.javascript != SiteRule::Default) {
             out << "javascript = \"" << site_rule_name(policy.javascript) << "\"\n";
@@ -112,6 +113,9 @@ void SiteRules::save() const {
         }
         if (policy.fingerprint != SiteRule::Default) {
             out << "fingerprint = \"" << site_rule_name(policy.fingerprint) << "\"\n";
+        }
+        if (policy.permissions != SiteRule::Default) {
+            out << "permissions = \"" << site_rule_name(policy.permissions) << "\"\n";
         }
         out << "\n";
     }
@@ -138,7 +142,7 @@ void SiteRules::set(const std::string& host, const SitePolicy& policy) {
     std::string key = to_lower(trim(host));
     if (key.empty()) return;
     if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
-        && policy.fingerprint == SiteRule::Default) {
+        && policy.fingerprint == SiteRule::Default && policy.permissions == SiteRule::Default) {
         rules_.erase(key);
         return;
     }
@@ -153,7 +157,7 @@ std::vector<SiteRules::Entry> SiteRules::entries() const {
     std::vector<Entry> out;
     for (const auto& [host, policy] : rules_) {
         if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
-            && policy.fingerprint == SiteRule::Default) continue;
+            && policy.fingerprint == SiteRule::Default && policy.permissions == SiteRule::Default) continue;
         out.push_back(Entry{host, policy});
     }
     return out;
