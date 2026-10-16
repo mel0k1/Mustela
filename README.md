@@ -20,7 +20,9 @@ Existing engines force a trade-off between privacy, platform coverage and speed.
 
 ## Status
 
-`v0.9.0` — the engine became a real browsing platform: popups and `target=_blank` open as tabs and inherit the originating tab's privacy mode, `alert`/`confirm`/`prompt`/beforeunload show native dialogs with sanitized text, find-in-page (Ctrl+F) works with match counts and wrap-around on both ports, and hovering a link shows its destination in the status bar. The GTK port drives it through `create`/`script-dialog`/`WebKitFindController`; the Windows port through `WKPageUIClient` V6 and `WKPageFindClient`. Dialog text and find queries pass through a new `ui_text` core module (control-character stripping, CR/LF normalization, UTF-8-safe truncation), covered by the now 197-check suite.
+`v0.9.1` completes M5: downloads land in `downloads.dir` (or the platform Downloads folder) with collision-free names and a status-bar progress line, `downloads.mode = "ask"` opens a save dialog; zoom works on Ctrl+plus/minus/0 (30%–300%, default `shell.zoom`); permission requests (geolocation, camera, microphone, notifications) resolve through a new core policy — global `deny`/`ask`/`allow` per kind plus a per-site `permissions` rule in `sites.toml` remembered from "always/never" prompt choices; invalid TLS certificates prompt on GTK (`security.tls_strict`) and HTTP auth prompts for credentials on both ports; crashed web processes auto-reload twice with a crash-loop guard on both ports. The Windows header pin grew to 86 with the auth/credential set; the suite is now 245 checks.
+
+`v0.9.0` made the engine a real browsing platform: popups and `target=_blank` open as tabs and inherit the originating tab's privacy mode, `alert`/`confirm`/`prompt`/beforeunload show native dialogs with sanitized text, find-in-page (Ctrl+F) works with match counts and wrap-around on both ports, and hovering a link shows its destination in the status bar.
 
 `v0.8.1` added the cross-platform bench: `mustela-bench-win` runs the same page-load benchmark on the WinCairo C API — a hidden host window with a non-persistent data store, identical CLI, JSON stats and budget exit codes; CI compile-checks it against pinned upstream WebKit headers on every push. The engine also got its second full gap review in [docs/GAPS.md](docs/GAPS.md).
 
@@ -56,12 +58,12 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The suite covers settings round-trips, privacy gating invariants, site-rule matching, history escaping, fingerprint presets, browsing-data kinds, URL normalization, the perf module (statistics, record codec, budgets) and the ui-text sanitization rules. On Linux the full GTK shell and `mustela-bench` are built in the same run, and the bench loads the local fixture under xvfb; on Windows, CI additionally compiles `shell_win.cpp` and `bench_win.cpp` against pinned upstream WebKit C API headers.
+The suite covers settings round-trips, privacy gating invariants, permission-policy resolution, site-rule matching (including per-site permissions), history escaping, fingerprint presets, browsing-data kinds, URL normalization, the perf module (statistics, record codec, budgets) and the ui-text sanitization rules (dialog text, find queries, download file names). On Linux the full GTK shell and `mustela-bench` are built in the same run, and the bench loads the local fixture under xvfb; on Windows, CI additionally compiles `shell_win.cpp` and `bench_win.cpp` against pinned upstream WebKit C API headers.
 
 ## Layout
 
 ```
-src/core/        settings, privacy policy, site rules, fingerprint budget, browsing-data kinds, url normalization, ui-text sanitization (portable, no UI deps)
+src/core/        settings, privacy policy, permission policy, site rules, fingerprint budget, browsing-data kinds, url normalization, ui-text sanitization (portable, no UI deps)
 src/shell/       embedder shell, one directory per port
 src/shell/gtk/   Linux port (WebKitGTK)
 src/shell/win/   Windows port (WinCairo over the WebKit C API)

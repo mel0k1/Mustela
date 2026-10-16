@@ -141,6 +141,14 @@ The performance log (`perf.log`) records only local timing and RSS numbers: dura
 
 History is stored by the core (`HistoryStore`) inside the default profile. Private tabs never reach it — `PrivacyPolicy::records_history` returns false for them — and `privacy.history_enabled = false` turns recording off entirely.
 
+### Permissions, certificates and authentication
+
+Permission requests (geolocation, camera, microphone, notifications) default to `deny` in `settings.toml` — a site that wants your location gets silence unless you flip `permissions.geolocation` (and friends) to `ask` or `allow`. The `ask` mode shows a prompt with Allow / Deny / Always allow / Never allow; the last two write a per-site `permissions` rule into `sites.toml`, which then answers future requests for that host without asking. Private tabs prompt identically but never write rules, so an ephemeral session cannot leave a permission trail. Display capture follows the camera setting on GTK; every other unrecognized permission kind (pointer lock, XR and anything new) is denied without a prompt.
+
+Invalid TLS certificates fail the load by default (`security.tls_strict`); the GTK port then offers an explicit allow-once prompt — the acceptance lives for that single load and is never stored. `security.tls_strict = false` ignores TLS errors entirely and exists for broken local networks, not as a daily-driver setting. HTTP authentication asks for user and password in a native dialog; credentials are created for the session only and are never written to disk. On Windows the C API offers no certificate-acceptance call, so strict TLS is the only mode there and server-trust auth challenges are rejected.
+
+Downloads land in the platform Downloads folder (or `downloads.dir`) under a name sanitized in the core — path separators and control characters stripped — and never overwrite an existing file. The suggested name comes from the server response, so a hostile `Content-Disposition` cannot escape the destination directory.
+
 ### What stays constant
 
 - The shell toolbar has a Private toggle that switches the default for new tabs at runtime; it is session-scoped and never persisted.

@@ -41,6 +41,14 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | shell.search_template | https://duckduckgo.com/?q=%s | `%s` is replaced with the query |
 | shell.window_width | 1280 | window width, updated on exit |
 | shell.window_height | 800 | window height, updated on exit |
+| shell.zoom | 1.0 | default zoom for new tabs, 0.3–3.0 (Ctrl+plus/minus/0 changes the active tab) |
+| downloads.dir | (empty) | download destination; empty means the platform Downloads folder |
+| downloads.mode | auto | `auto` saves without asking, `ask` opens a save dialog per download |
+| permissions.geolocation | deny | `deny`, `ask` or `allow` for location requests |
+| permissions.camera | deny | `deny`, `ask` or `allow` for camera requests |
+| permissions.microphone | deny | `deny`, `ask` or `allow` for microphone requests |
+| permissions.notifications | deny | `deny`, `ask` or `allow` for notification permission (GTK; Windows auto-denies) |
+| security.tls_strict | true | fail loads with invalid TLS certificates and prompt to continue; `false` ignores TLS errors |
 | privacy.private_tabs_enabled | true | allow private tabs at all |
 | privacy.start_in_private | false | open new tabs in private mode by default |
 | privacy.history_enabled | true | record visited pages in history |
@@ -78,7 +86,7 @@ cookies = "deny"
 fingerprint = "allow"
 ```
 
-A rule for a domain covers its subdomains (`example.org` matches `www.example.org`). The same rules are editable at runtime in the site-rules window (`Ctrl+Shift+S`): buttons act on the selected row, or on the current site when nothing is selected. `fingerprint = "allow"` exempts the site from all fingerprint switches (use for maps, games, canvas apps); `fingerprint = "deny"` forces the strict set on it.
+A rule for a domain covers its subdomains (`example.org` matches `www.example.org`). The same rules are editable at runtime in the site-rules window (`Ctrl+Shift+S`): buttons act on the selected row, or on the current site when nothing is selected. `fingerprint = "allow"` exempts the site from all fingerprint switches (use for maps, games, canvas apps); `fingerprint = "deny"` forces the strict set on it. `permissions = "allow"` remembers a granted permission for the host (skip the prompt for future requests); `permissions = "deny"` blocks them without asking. Both are also written by the "Always allow" / "Never allow" choices in the permission prompt; private tabs never write rules.
 
 ## Shortcuts
 
@@ -90,15 +98,16 @@ A rule for a domain covers its subdomains (`example.org` matches `www.example.or
 | Ctrl+L | focus the address bar |
 | Ctrl+H | history window |
 | Ctrl+F | find in page (Enter / Shift+Enter — next / previous match, Escape closes) |
+| Ctrl+plus / Ctrl+minus / Ctrl+0 | zoom in / out / reset (30%–300%) |
 | Ctrl+Shift+Del | clear browsing data (cookies, cache, storage, IndexedDB) |
 | Ctrl+Shift+S | site rules window |
 | Ctrl+R / F5 | reload |
 | Alt+Left / Alt+Right | back / forward |
 | Escape | stop loading |
 
-Linux shortcuts apply to the GTK port. The Windows port shares Ctrl+T, Ctrl+W, Ctrl+L, Ctrl+R, F5, Ctrl+H, Ctrl+F, Ctrl+Shift+Del, Alt+Left and Alt+Right; Escape and Ctrl+Shift+S (site rules window) are GTK-only for now.
+Linux shortcuts apply to the GTK port. The Windows port shares Ctrl+T, Ctrl+W, Ctrl+L, Ctrl+R, F5, Ctrl+H, Ctrl+F, Ctrl+Shift+Del, Alt+Left, Alt+Right and the zoom trio; Escape and Ctrl+Shift+S (site rules window) are GTK-only for now.
 
-## Popups, dialogs, find
+## Popups, dialogs, find, downloads, permissions
 
 Links with `target=_blank` and `window.open` open as new tabs and inherit the originating tab's privacy mode: a popup from a private tab stays on the private (ephemeral) context or data store, and per-site policies are resolved for the popup URL like for any other tab. `window.close()` inside a popup closes its tab.
 
@@ -107,6 +116,14 @@ Links with `target=_blank` and `window.open` open as new tabs and inherit the or
 Find in page (Ctrl+F) searches case-insensitively with wrap-around, highlights all matches (GTK scrollbar marks and highlighting; Windows match overlay), shows the match count, and re-runs the current query when you switch tabs while the bar is open.
 
 Hovering a link shows its destination in the status bar on both ports.
+
+Downloads resolve their destination from `downloads.dir` (empty = the platform Downloads folder), never overwrite — a conflicting file gets a `name (2).ext` suffix — and sanitize the suggested file name in the core (`ui_text::sanitize_filename`). `downloads.mode = "ask"` opens a save dialog per download; cancelling it cancels the download. While a download runs, the status bar shows its name and percentage.
+
+Permission requests (geolocation, camera, microphone, notifications) resolve through the core policy: the global `permissions.*` choice decides deny/prompt/allow, and a per-site `permissions` rule in `sites.toml` overrides it — `allow` grants without asking, `deny` blocks silently. A prompt offers Allow / Deny / Always allow / Never allow; the last two write the per-site rule. Unknown permission kinds are denied.
+
+Invalid TLS certificates prompt before continuing on GTK (allow once per load, strict policy by default); on Windows the C API has no certificate-acceptance call, so such loads fail. HTTP authentication prompts for user and password on both ports; credentials last for the session only.
+
+If a web process dies, the tab reloads itself up to twice automatically (a crash-loop guard), the status bar shows the reason, and after the guard the usual Ctrl+R applies. The counter resets after a successful load.
 
 ## Tests
 
@@ -172,7 +189,7 @@ cmake --build build --config Release
 
 The SDK directory is expected to have `include/WebKit/*.h` (the C API headers from the WebKit source tree: `Source/WebKit/UIProcess/API/C`, `Source/WebKit/UIProcess/API/C/win`, `Source/WebKit/Shared/API/c`) and `lib/` with the WebKit import libraries (`WebKit`, `WebCore`, `WTF`, `JavaScriptCore`, `PAL`). At runtime the WebKit DLLs, helper processes and the WinCairo dependency DLLs (from `WinCairoRequirements`) must sit next to `mustela.exe`.
 
-CI compiles `shell_win.cpp` against 80 pinned upstream headers on every push (job `windows shell`), so the Windows sources are never farther than one commit from reality. The header set is listed in `scripts/win-headers.txt` and fetched by `scripts/fetch-win-headers.ps1`.
+CI compiles `shell_win.cpp` against 86 pinned upstream headers on every push (job `windows shell`), so the Windows sources are never farther than one commit from reality. The header set is listed in `scripts/win-headers.txt` and fetched by `scripts/fetch-win-headers.ps1`.
 
 Profile data on Windows lives under `%APPDATA%\mustela`: `settings.toml` and `sites.toml` at the root, `profiles\default\` for cookies, cache, storage, the compiled font filter and `perf.jsonl`. Both TOML files are watched with `ReadDirectoryChangesW` — edits apply live, same as on Linux. The perf module works identically on both ports: startup is measured to first paint (`WM_PAINT`), memory is sampled from the process tree via `GetProcessMemoryInfo`, and page loads are timed between the provisional-start and finish navigation callbacks.
 

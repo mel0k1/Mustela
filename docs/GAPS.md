@@ -8,28 +8,28 @@ Every source file was re-read against two questions: does the engine expose this
 
 ## What exists today
 
-- Core: TOML settings, privacy policy with per-site rules, fingerprint budget, history, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log), `ui_text` sanitization for dialog text and find queries. 197-check test suite.
-- GTK shell: tabs, URL bar with search fallback, private toggle, history window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model, popups as tabs, native JS dialogs, find-in-page, status link preview.
-- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies), popups via `WKPageUIClient` V6, dialog listeners, `WKPageFindClient` find bar, link preview.
+- Core: TOML settings, privacy policy with per-site rules, permission policy with per-site grants, fingerprint budget, history, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log), `ui_text` sanitization for dialog text, find queries and download names. 245-check test suite.
+- GTK shell: tabs, URL bar with search fallback, private toggle, history window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model, popups as tabs, native JS dialogs, find-in-page, status link preview, downloads, zoom, permission prompts, TLS certificate prompt, HTTP auth prompt, crash recovery.
+- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies), popups via `WKPageUIClient` V6, dialog listeners, `WKPageFindClient` find bar, link preview, downloads, zoom, permission prompts, HTTP auth prompt, crash recovery.
 - Bench: `mustela-bench` (GTK, runs in CI under xvfb) and `mustela-bench-win` (WinCairo, hidden host window; compiled in CI, executed on demand).
-- CI: three green tracks — Linux full build + tests + bench, Windows core tests, Windows shell and bench compile against 80 pinned upstream headers.
+- CI: three green tracks — Linux full build + tests + bench, Windows core tests, Windows shell and bench compile against 86 pinned upstream headers.
 
 ## Browsing platform gaps (priority 1)
 
-These are the capabilities a browser-shaped consumer (Kiwi) will need first. Popups, JS dialogs, find-in-page and status link preview shipped in M5; the rest are absent today.
+These are the capabilities a browser-shaped consumer (Kiwi) will need first. Popups, JS dialogs, find-in-page, status link preview, downloads, zoom, permissions, certificate/auth and crash recovery shipped in M5; the rest are absent today.
 
 | Gap | Unused API surface | Notes |
 |---|---|---|
 | New windows and popups | ~~GTK `create` signal; Win `WKPageUIClient.createNewPage`~~ — done in M5 | `target=_blank` and `window.open` open as tabs; privacy context inherited from the originator |
 | JavaScript dialogs | ~~GTK `script-dialog`; Win `WKPageUIClient` alert/confirm/prompt/beforeunload~~ — done in M5 | Native dialogs with sanitized text on both ports |
-| Downloads | GTK `download-started`; Win `WKContextDownloadClient` | A download click does nothing today |
+| Downloads | ~~GTK `download-started`; Win `WKContextDownloadClient`~~ — done in M5 | Destination from `downloads.dir`, ask mode, status-bar progress |
 | Find in page | ~~GTK `WebKitFindController`; Win `WKPageFindClient`~~ — done in M5 | Ctrl+F bar, next/previous, match counts, wrap-around |
-| Zoom | GTK `webkit_web_view_set_zoom_level`; Win `WKPageSetScaleFactor` | No UI or settings key |
+| Zoom | ~~GTK `webkit_web_view_set_zoom_level`; Win `WKPageSetScaleFactor`~~ — done in M5 | Ctrl+plus/minus/0, `shell.zoom` default |
 | Fullscreen | GTK `run-as-modal`; Win `WKPageFullScreenClient` | HTML5 fullscreen requests fail silently |
 | Context menu | GTK `context-menu` signal; Win `WKPageContextMenuClient` | Default menus appear (GTK) or nothing (Win); no Mustela items (open in private tab, copy link) |
-| Permissions | GTK `permission-request`; Win `WKUserMediaPermissionRequest` / `WKGeolocationManager` | Geolocation, camera, microphone and notifications are auto-denied or unset — no policy surface, no per-site memory |
-| Certificate and HTTP auth errors | GTK `accept-certificate` / `authenticate`; Win `didReceiveAuthenticationChallenge` | TLS failures just fail the load; no allow-once/allow-always decision, no credential prompt |
-| Web process crash | GTK `web-process-terminated`; Win `webProcessDidCrash` | A crashed tab shows a blank view; no reload affordance or event for Kiwi |
+| Permissions | ~~GTK `permission-request`; Win geolocation/usermedia in `WKPageUIClient` V6~~ — done in M5 | Global `permissions.*` choices + per-site `permissions` rule; GTK adds notifications; Win notifications stay auto-denied (no C API decision call) |
+| Certificate and HTTP auth errors | ~~GTK `accept-certificate` / `authenticate`; Win `didReceiveAuthenticationChallenge`~~ — done in M5 | GTK: allow-once cert prompt + credential prompt; Win: credential prompt, server-trust auto-rejected (C API has no cert acceptance) |
+| Web process crash | ~~GTK `web-process-terminated`; Win `webProcessDidTerminate`~~ — done in M5 | Two guarded auto-reloads, reason in the status bar |
 | Session restore | (core) | Tabs are not persisted across restarts; no session file format in the core |
 | Status link preview | ~~GTK `mouse-target-changed`; Win `mouseDidMoveOverElement`/`setStatusText`~~ — done in M5 | Hover URL in the status bar on both ports |
 
@@ -71,7 +71,7 @@ Leftovers from M4 plus what the bench variant opened up.
 | Tabs, URL bar, search fallback, shortcuts | yes | yes |
 | Private tabs, privacy toggle | yes | yes |
 | Cookie policy, ITP, hardening | yes | yes |
-| Per-site rules: JS, cookies, fingerprint | yes | yes (via `sites.toml`) |
+| Per-site rules: JS, cookies, fingerprint, permissions | yes | yes (via `sites.toml`) |
 | Site-rules window | yes | no (file editing + hot-reload) |
 | History, clear-data | yes | yes |
 | Per-origin cookie wipe on deny | yes | no (C API limit) |
@@ -82,18 +82,25 @@ Leftovers from M4 plus what the bench variant opened up.
 | JS dialogs (alert/confirm/prompt/beforeunload) | yes | yes |
 | Find in page (Ctrl+F) | yes | yes |
 | Status link preview | yes | yes |
+| Downloads (auto dir / ask) | yes | yes |
+| Zoom (Ctrl+plus/minus/0, 30–300%) | yes | yes |
+| Permission prompts: geolocation, camera, mic | yes | yes |
+| Permission prompts: notifications | yes | auto-deny (no C API call) |
+| TLS certificate prompt | yes (allow once) | no (C API limit; auto-reject) |
+| HTTP auth prompt | yes | yes |
+| Web process crash recovery | yes | yes |
 | Bench | GTK, runs in CI | WinCairo, compile-checked in CI |
 
 ## Build and CI gaps
 
 - No release job: no Linux package (deb/AppImage/Flatpak) and no Windows bundle (exe + required WebKit DLLs). The WinCairo runtime requirements are the main unknown for a Windows release.
 - No sanitizer runs (ASan/UBSan on the core suite) and no static analysis (clang-tidy) in CI. The core is small; both are cheap wins.
-- The Windows header pin (WebKit 8ece203) floats conceptually over an unpinned runtime; a release must pin both.
+- The Windows header pin (WebKit 8ece203, 86 headers) floats conceptually over an unpinned runtime; a release must pin both.
 - MinGW is a verified local toolchain (win32-thread variant; posix threads conflict with `WKBaseWin.h`'s `pid_t`) but CI uses MSVC only. Fine while MSVC is the supported Windows compiler.
 
 ## Suggested order
 
-1. M5 — browsing platform basics: popups, JS dialogs and find-in-page shipped; the remaining items are downloads, zoom, certificate/auth surface, crash recovery, permissions policy. Mostly port work with thin core additions (permission policy, session types).
+1. M5 — browsing platform basics: shipped in full — popups, JS dialogs, find-in-page, link preview, downloads, zoom, permission policy with per-site memory, certificate/auth surface, crash recovery.
 2. M6 — privacy deepening: GPC, tracking-domain blocklist, secure DNS, public-suffix guard in site rules, settings load report.
 3. K1 — Kiwi consumes the declared public core surface (profiles, per-site policy UI) while the shell harness keeps parity work behind it.
 4. Ongoing: release/packaging job as soon as Windows runtime story settles.

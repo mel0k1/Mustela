@@ -51,7 +51,7 @@ Known gaps, tracked for the next pass: per-site cookie denial works through the 
 
 - Linux: full GTK shell build against `webkit2gtk-4.1` plus the core test suite on every push. (done)
 - Windows: core and tests under MSVC. (done)
-- Windows shell syntax check against 80 pinned upstream WebKit C API headers (`scripts/fetch-win-headers.ps1`). (done)
+- Windows shell syntax check against 86 pinned upstream WebKit C API headers (`scripts/fetch-win-headers.ps1`). (done)
 
 ## M4 — Performance (done)
 
@@ -74,10 +74,15 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 
 - New windows and popups open as tabs on both ports: GTK `create` signal with related views, Windows `WKPageUIClient` V6 `createNewPage`; privacy context and data store are inherited from the originating tab, `ready-to-show`/`showPage` focuses the popup, JS `window.close()` closes the tab. (done)
 - JavaScript dialogs are native: alert, confirm, prompt (with editable default value) and beforeunload confirmation on both ports — GTK `script-dialog`, Windows `WKPageUIClient` async dialog listeners. (done)
-- Dialog text and find queries pass through `mustela::ui_text`: control characters stripped, CR/LF normalized, byte-capped with UTF-8-safe truncation — unit-tested in the core. (done)
+- Dialog text, find queries and download file names pass through `mustela::ui_text`: control characters stripped, CR/LF normalized, byte-capped with UTF-8-safe truncation — unit-tested in the core. (done)
 - Find in page: find bar (Ctrl+F) with next/previous (Enter/Shift+Enter), match counts, case-insensitive wrap-around search, re-search on tab switch — GTK `WebKitFindController`, Windows `WKPageFindClient` + `WKPageFindString` with the match overlay. (done)
 - Status-bar link preview on both ports: GTK `mouse-target-changed`, Windows `mouseDidMoveOverElement`/`setStatusText`. (done)
-- Known gaps kept for later M5 items: downloads, zoom, fullscreen, permissions, certificate/auth, crash recovery (see [GAPS.md](GAPS.md)).
+- Downloads on both ports: GTK `download-started`, Windows `WKContextDownloadClient`; destination resolved from `downloads.dir` (platform Downloads folder by default) with collision-free file names, `downloads.mode = "ask"` opens a save dialog (GtkFileChooser / GetSaveFileName); progress in the status bar, cancel on dialog refusal. (done)
+- Zoom on both ports: Ctrl+plus/minus/0 steps 30%–300% — GTK `zoom_level`, Windows `WKPageSetScaleFactor` re-applied on commit; default from `shell.zoom`. (done)
+- Permission policy in the core (`permissions.hpp`): global choices `deny`/`ask`/`allow` per permission kind (`permissions.geolocation`, `.camera`, `.microphone`, `.notifications`, all deny by default) resolved against a per-site `permissions` rule in `sites.toml`; prompts offer allow/deny/always/never, "always" and "never" are remembered per host (private tabs never write rules). GTK handles geolocation, camera/microphone and notifications via `permission-request`; Windows covers geolocation and camera/microphone through `WKPageUIClient` V6, notifications stay auto-denied (the pinned C API exposes no per-request decision call). (done)
+- Certificate and auth surface: GTK `accept-certificate` prompts before continuing on invalid certificates (strict TLS policy default, `security.tls_strict = false` ignores), `authenticate` prompts for user/password with session credentials; Windows `didReceiveAuthenticationChallenge` (pinned headers extended with the auth/credential set) prompts for basic auth and rejects server-trust challenges — the WinCairo C API has no certificate-acceptance call. (done)
+- Web process crash recovery on both ports: GTK `web-process-terminated`, Windows `webProcessDidTerminate`; up to two automatic reloads per tab with a crash-loop guard, status message with the reason, manual Ctrl+R afterwards; the counter resets on a successful load. (done)
+- Known gaps kept for later: HTML5 fullscreen, context menu, session restore (see [GAPS.md](GAPS.md)).
 
 ## K1 — Kiwi browser
 
