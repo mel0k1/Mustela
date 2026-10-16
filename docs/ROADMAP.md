@@ -62,7 +62,13 @@ Known gaps, tracked for the next pass: per-site cookie denial works through the 
 - `mustela-bench` harness: real loads through a minimal offscreen WebKit shell, JSON stats (min/median/p95/max), budget exit code; runs under `xvfb-run` in CI on every push. (done)
 - Regression tracking: `scripts/perf_check.py` summarizes `perf.jsonl` and compares medians against a recorded baseline with tolerance. (done)
 
-Known gaps, tracked for the next pass: the ceiling only warns — there is no tab discarding (WebKitGTK and the WinCairo C API expose no per-view suspend), `mustela-bench` is Linux-only (the WinCairo harness would need a hidden-hostwindow variant), and `perf.process_model` is applied at startup only.
+Known gaps, tracked for the next pass: the ceiling only warns — there is no tab discarding (WebKitGTK and the WinCairo C API expose no per-view suspend), `perf.process_model` is applied at startup only, and the WinCairo bench compiles in CI but does not run there (GitHub Windows runners ship no WinCairo runtime).
+
+## M4.5 — Windows bench and gap analysis (done)
+
+- `mustela-bench-win`: the same page-load harness on the WinCairo C API — hidden host window, non-persistent data store, identical CLI (`--url/--runs/--max-ms/--out`), identical JSON stats and exit codes. (done)
+- Built with the Windows SDK branch in CMake (`mustela-bench-win`) and compile-checked against the pinned upstream headers on every push. (done)
+- Second full engine review at v0.8.0 recorded in [GAPS.md](GAPS.md): browsing-platform gaps (popups, dialogs, downloads, find, zoom, permissions, certificates), privacy deepening candidates (GPC, tracking blocklist, secure DNS), performance leftovers and the Kiwi API surface, with a suggested milestone order. (done)
 
 ## M5 — Kiwi browser
 

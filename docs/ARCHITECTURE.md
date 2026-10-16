@@ -54,6 +54,6 @@ The Linux port links `webkit2gtk-4.1` through pkg-config. The Windows port links
 
 - **linux** — full GTK shell build against `webkit2gtk-4.1`, ctest, then `mustela-bench` over the local fixture under `xvfb-run` with a generous `--max-ms` budget.
 - **windows core** — core and tests under MSVC.
-- **windows shell** — `shell_win.cpp` compiled against 80 pinned upstream WebKit C API headers (`scripts/fetch-win-headers.ps1`, pinned commit in the script), so the WinCairo embedding is checked against reality without building WebKit.
+- **windows shell** — `shell_win.cpp` and `bench_win.cpp` compiled against 80 pinned upstream WebKit C API headers (`scripts/fetch-win-headers.ps1`, pinned commit in the script), so the WinCairo embedding and the Windows bench are checked against reality without building WebKit.
 
 The bench step in CI is a smoke budget, not a performance gate: runner hardware varies, so 10 seconds catches hangs and catastrophic regressions only. Real regression tracking happens locally with `scripts/perf_check.py` against a recorded baseline.

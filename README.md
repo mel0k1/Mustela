@@ -20,7 +20,7 @@ Existing engines force a trade-off between privacy, platform coverage and speed.
 
 ## Status
 
-`v0.8.0` — performance is a measured surface, not a slogan. Startup is timed to first map (Linux) / first paint (Windows) and enforced against `perf.startup_budget_ms`; page loads are timed between provisional start and finish; the process tree's RSS is sampled every minute against `perf.memory_ceiling_mb` with a status-bar warning; `perf.process_model` switches between per-view isolation and a shared low-memory web process. All samples append to `perf.jsonl` in the profile, `scripts/perf_check.py` compares medians against a recorded baseline for regression tracking, and a new `mustela-bench` harness runs real page loads in CI (Linux, under xvfb) with a JSON result and a budget exit code. CI now builds all of this on every push: the GTK shell plus ctest plus the bench on Linux, the core on MSVC, and the Windows shell against pinned upstream WebKit headers. The portable core is covered by a 180-check test suite.
+`v0.8.1` — the bench went cross-platform. `mustela-bench-win` runs the same page-load benchmark on the WinCairo C API: a hidden host window with a non-persistent data store, identical CLI, JSON stats and budget exit code as the GTK bench; CI compile-checks it against pinned upstream WebKit headers on every push. The engine also got its second full gap review in [docs/GAPS.md](docs/GAPS.md) — browsing-platform gaps (popups, dialogs, downloads, find, permissions, certificates), privacy deepening candidates and the Kiwi API surface, prioritized.
 
 The v0.7 Windows port remains the base: `src/shell/win/` embeds the upstream WinCairo flavor of WebKit through its C API — tabs, URL bar with search fallback, persistent profile under `%APPDATA%\mustela`, private tabs on non-persistent data stores, cookie accept policy, ITP, hardening switches, the full fingerprint budget (user scripts plus a compiled content filter), history, clear-browsing-data and settings hot-reload — and the v0.6 privacy core (cookie policy, ITP, hardening, per-site overrides, fingerprint budget, hot-reload) keeps resolving everything through `PrivacyPolicy` in the core.
 
@@ -54,7 +54,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The suite covers settings round-trips, privacy gating invariants, site-rule matching, history escaping, fingerprint presets, browsing-data kinds, URL normalization and the perf module (statistics, record codec, budgets). On Linux the full GTK shell and `mustela-bench` are built in the same run, and the bench loads the local fixture under xvfb; on Windows, CI additionally compiles `shell_win.cpp` against pinned upstream WebKit C API headers.
+The suite covers settings round-trips, privacy gating invariants, site-rule matching, history escaping, fingerprint presets, browsing-data kinds, URL normalization and the perf module (statistics, record codec, budgets). On Linux the full GTK shell and `mustela-bench` are built in the same run, and the bench loads the local fixture under xvfb; on Windows, CI additionally compiles `shell_win.cpp` and `bench_win.cpp` against pinned upstream WebKit C API headers.
 
 ## Layout
 
@@ -63,6 +63,7 @@ src/core/        settings, privacy policy, site rules, fingerprint budget, brows
 src/shell/       embedder shell, one directory per port
 src/shell/gtk/   Linux port (WebKitGTK)
 src/shell/win/   Windows port (WinCairo over the WebKit C API)
+src/bench/       page-load benchmark harness (GTK and WinCairo variants)
 src/tests/       core test suite (ctest)
 docs/            architecture, privacy model, roadmap, building
 ```

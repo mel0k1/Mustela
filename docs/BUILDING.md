@@ -119,6 +119,16 @@ xvfb-run -a env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \
 
 Options: `--url` (required), `--runs N` (default 5), `--max-ms M` — fail with exit code 2 when the median exceeds the budget, `--out FILE` — write the JSON result to a file. The output is one JSON line: `n`, `min_ms`, `median_ms`, `p95_ms`, `max_ms`. Exit codes: 0 ok, 2 budget exceeded or no completed loads, 3 load failed, 4 load timed out. CI runs exactly this command (with `--max-ms 10000`) on every push; the sandbox environment variable is only needed inside headless containers.
 
+On Windows the same harness exists as `mustela-bench-win` (WinCairo C API): it loads pages inside a hidden host window with a non-persistent data store, so a benchmark run leaves no profile behind. Build it against a WebKit SDK directory:
+
+```bat
+cmake -S . -B build -DMUSTELA_WEBKIT_SDK=C:/path/to/sdk
+cmake --build build --config Release --target mustela-bench-win
+build\Release\mustela-bench-win.exe --url "file:///C:/tests/fixtures/bench.html" --runs 5 --max-ms 10000
+```
+
+CLI, JSON output and exit codes are identical to the GTK bench. CI compile-checks `mustela-bench-win` against the pinned upstream headers on every push; running it requires a WinCairo runtime (`WebKit.dll` and its dependencies) next to the executable.
+
 Page-load samples recorded by the shells and by `mustela-bench`-style runs land in `perf.jsonl` in the profile directory. `scripts/perf_check.py` summarizes them and compares against a baseline for regression tracking:
 
 ```bash
