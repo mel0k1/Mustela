@@ -10,6 +10,9 @@
 #include <set>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
@@ -298,7 +301,7 @@ SocketHandle connect_to_endpoint(const std::string& host, int port, std::string&
     for (addrinfo* item = list; item; item = item->ai_next) {
         handle = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
         if (handle == invalid_socket_value) continue;
-        if (connect_with_timeout(handle, item->ai_addr, item->ai_addrlen)) break;
+        if (connect_with_timeout(handle, item->ai_addr, static_cast<socklen_t>(item->ai_addrlen))) break;
         close_socket(handle);
         handle = invalid_socket_value;
     }
@@ -367,15 +370,15 @@ void relay_two_way(SocketHandle a, SocketHandle b) {
         timeval timeout;
         timeout.tv_sec = kIdleTimeoutSeconds;
         timeout.tv_usec = 0;
-        int ready = select_ready(std::max(a, b), &readfds, nullptr, &timeout);
+        int ready = select_ready((std::max)(a, b), &readfds, nullptr, &timeout);
         if (ready <= 0) break;
         bool alive = true;
         if (FD_ISSET(a, &readfds)) {
-            int got = static_cast<int>(recv(a, buffer, sizeof(buffer), 0));
+            int got = static_cast<int>(recv(a, buffer, static_cast<int>(sizeof(buffer)), 0));
             if (got <= 0 || !send_all(b, buffer, static_cast<size_t>(got))) alive = false;
         }
         if (alive && FD_ISSET(b, &readfds)) {
-            int got = static_cast<int>(recv(b, buffer, sizeof(buffer), 0));
+            int got = static_cast<int>(recv(b, buffer, static_cast<int>(sizeof(buffer)), 0));
             if (got <= 0 || !send_all(a, buffer, static_cast<size_t>(got))) alive = false;
         }
         if (!alive) break;
@@ -650,7 +653,7 @@ std::string DohResolver::resolve(const std::string& host) {
     for (const doh::Answer& item : response.answers) {
         if (item.type == 1 && item.data.find_first_not_of("0123456789.") == std::string::npos) {
             ip = item.data;
-            ttl = std::max(30u, std::min(600u, item.ttl));
+            ttl = (std::max)(30u, (std::min)(600u, item.ttl));
             break;
         }
     }
