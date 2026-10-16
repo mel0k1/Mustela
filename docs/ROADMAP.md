@@ -104,6 +104,12 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 - Test suite 322 → 386 checks: proxy config keys, proxy URL parsing, resolver behavior (cache, failure, NXDOMAIN) and loopback integration tests — blocked CONNECT and GET, subdomain blocking, bidirectional tunnel echo, request forwarding with origin-form rewrite, upstream-chained tunnel and forward, fail-closed 502 on DoH failure. (done)
 - Honest limits: HTTPS blocking is connection-level (authority from CONNECT — no URL inspection without interception), plain HTTP blocking is request-level; `upstream`-only mode bypasses the local engine (no blocking, no DoH there); the Windows curl proxy hook is compile-verified but cannot execute in CI (no WinCairo runtime on runners).
 
+## M8 — Settings hygiene and suffix guard (done)
+
+- Public-suffix guard in the core (`psl.hpp`): a compact bundled public-suffix list — common gTLDs, popular ccTLD second levels, wildcard (`*.ck`, `*.kobe.jp`) and exception (`!www.ck`) rules — with `is_public_suffix` and `registrable_domain`. Registry-suffix sections in `sites.toml` are skipped on load, `set()` refuses them and rule lookup stops climbing at the effective top level, so one entry can never cover a whole registry; IP literals and `localhost` remain addressable. (done)
+- Settings load report in the core (`SettingsReport`): `load_settings` reports the schema `version` (a file written by a newer engine warns), applied/unknown/invalid key counts and the offending keys themselves; `save_settings` stamps `version = 1`; GTK prints issues on stdout, Windows through the debug output — on startup and on every hot-reload. (done)
+- Test suite 386 → 468 checks: PSL matching (exact, wildcard, exception, unlisted TLD, IP and localhost cases), the site-rules guard (load skip, set refusal, save round-trip) and the load report (unknown keys, invalid values, version warning, clean round-trip, missing file). (done)
+
 ## K1 — Kiwi browser
 
 - The product browser lives in the separate [Kiwi](https://github.com/mel0k1/Kiwi) repository; mustela-shell stays the engine's test harness.

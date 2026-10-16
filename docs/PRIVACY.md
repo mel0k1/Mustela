@@ -109,7 +109,7 @@ The status label shows `fp` whenever any fingerprint defense is active globally.
 
 ### Per-site overrides
 
-`~/.config/mustela/sites.toml` overrides the global policy per host:
+`~/.config/mustela/sites.toml` overrides the global policy per host. Hosts are guarded by the bundled public-suffix list: a section for a registry suffix like `[co.uk]` is skipped on load and refused on save, so one entry can never silently cover a whole registry — rules belong to registrable domains (`example.org`, `foo.co.uk`). Rule lookup climbs the host only until the effective top level, and IP addresses plus `localhost` stay addressable for local development.
 
 ```toml
 [example.org]

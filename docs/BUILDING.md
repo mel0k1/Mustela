@@ -33,7 +33,7 @@ Run:
 
 ## Configuration
 
-Settings live in `~/.config/mustela/settings.toml`, created on first run and saved on exit.
+Settings live in `~/.config/mustela/settings.toml`, created on first run and saved on exit. The file carries a `version` key (currently 1); on load the engine reports unknown keys, invalid values and files written by a newer engine — GTK prints them to stdout, Windows to the debug output — while the remaining keys still apply on top of defaults.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -95,7 +95,7 @@ cookies = "deny"
 fingerprint = "allow"
 ```
 
-A rule for a domain covers its subdomains (`example.org` matches `www.example.org`). The same rules are editable at runtime in the site-rules window (`Ctrl+Shift+S`): buttons act on the selected row, or on the current site when nothing is selected. `fingerprint = "allow"` exempts the site from all fingerprint switches (use for maps, games, canvas apps); `fingerprint = "deny"` forces the strict set on it. `permissions = "allow"` remembers a granted permission for the host (skip the prompt for future requests); `permissions = "deny"` blocks them without asking. Both are also written by the "Always allow" / "Never allow" choices in the permission prompt; private tabs never write rules.
+A rule for a domain covers its subdomains (`example.org` matches `www.example.org`). Sections for registry suffixes (`[com]`, `[co.uk]`, any public suffix from the bundled list) are ignored on load and cannot be written back, so a single entry can never cover a whole registry; IP addresses and `localhost` are valid hosts. The same rules are editable at runtime in the site-rules window (`Ctrl+Shift+S`): buttons act on the selected row, or on the current site when nothing is selected. `fingerprint = "allow"` exempts the site from all fingerprint switches (use for maps, games, canvas apps); `fingerprint = "deny"` forces the strict set on it. `permissions = "allow"` remembers a granted permission for the host (skip the prompt for future requests); `permissions = "deny"` blocks them without asking. Both are also written by the "Always allow" / "Never allow" choices in the permission prompt; private tabs never write rules.
 
 ## Shortcuts
 
