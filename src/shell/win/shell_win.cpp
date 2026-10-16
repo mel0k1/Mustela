@@ -1828,8 +1828,25 @@ DWORD WINAPI watcher_main(LPVOID) {
     return 0;
 }
 
+void report_settings_issues(const mustela::SettingsReport& report) {
+    if (report.unknown_keys.empty() && report.invalid_values.empty() && report.warnings.empty()) return;
+    std::string text = "mustela: settings " + report.summary() + "\n";
+    for (const std::string& key : report.unknown_keys) {
+        text += "mustela: unknown settings key " + key + "\n";
+    }
+    for (const std::string& item : report.invalid_values) {
+        text += "mustela: invalid settings value for " + item + "\n";
+    }
+    for (const std::string& item : report.warnings) {
+        text += "mustela: " + item + "\n";
+    }
+    OutputDebugStringA(text.c_str());
+}
+
 void reload_settings_and_policies(Browser& b) {
-    b.settings = mustela::load_settings(config_path("settings.toml"));
+    mustela::SettingsReport report;
+    b.settings = mustela::load_settings(config_path("settings.toml"), report);
+    report_settings_issues(report);
     b.privacy = mustela::privacy_from(b.settings);
     if (b.sites) b.sites->load();
 
@@ -2175,7 +2192,9 @@ int mustela_main(int argc, char** argv) {
     InitCommonControlsEx(&controls);
     OleInitialize(nullptr);
 
-    Settings settings = mustela::load_settings(config_path("settings.toml"));
+    mustela::SettingsReport settings_report;
+    Settings settings = mustela::load_settings(config_path("settings.toml"), settings_report);
+    report_settings_issues(settings_report);
     PrivacyPolicy privacy = mustela::privacy_from(settings);
 
     bool start_private = false;
