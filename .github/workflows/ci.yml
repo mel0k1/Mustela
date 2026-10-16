@@ -59,3 +59,6 @@ jobs:
 
       - name: Compile shell against upstream headers
         run: cl /nologo /c /W4 /std:c++20 /EHsc /Ibuild\sdk\include /Isrc /Isrc\core /Fobuild\shell_win.obj src\shell\win\shell_win.cpp
+
+      - name: Compile bench against upstream headers
+        run: cl /nologo /c /W4 /std:c++20 /EHsc /Ibuild\sdk\include /Isrc /Isrc\core /Fobuild\bench_win.obj src\bench\bench_win.cpp
