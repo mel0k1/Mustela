@@ -94,6 +94,16 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 - Session restore in the core (`session.hpp`): JSON session file with tabs (url, title, history lists, opaque per-port state) and the active index; GTK persists `WebKitWebViewSessionState` blobs and restores full back/forward history per tab, Windows restores tab URLs (the C API has no session-state restore); private tabs are never saved, `shell.session_restore` switches the feature. (done)
 - Known gaps kept: public-suffix guard in `SiteRules` and a settings load report (M6 leftovers), per-origin cookie wipe and disk cache clear on Windows (upstream-dependent), secure-DNS runtime hook (blocked on upstream APIs).
 
+## M7 — Local proxy network layer (done)
+
+- Local proxy engine in the core (`proxy_server.hpp`): loopback-only HTTP proxy with CONNECT tunneling and plain-HTTP forwarding; tracker domains are refused at connection setup with 403 (suffix match through the shared blocklist), plain-HTTP requests are additionally checked per request; the engine never intercepts TLS, so tunnel payloads stay opaque to it. (done)
+- Upstream chaining: `proxy.mode = "upstream"` routes the engine through an external proxy directly, and `proxy.upstream` (with `user`/`password` for Basic auth) chains the local proxy through it when both are configured. (done)
+- DoH resolver in the core (`DohResolver`): the RFC 8484 codec from M6 gets a runtime hook — the transport is injected as a callable, A answers are TTL-cached (30–600 s), IP literals bypass DNS, and a failed DoH lookup fails the connection instead of leaking the name to the system resolver. GTK supplies a libsoup transport, Windows a WinHTTP transport. (done)
+- GTK wiring: `proxy.mode = "local"` starts the engine-internal proxy and points both data managers at it via `webkit_website_data_manager_set_network_proxy_settings` (custom mode, loopback bypass list); `proxy.mode = "upstream"` points WebKit at the upstream directly; settings hot-reload restarts the proxy with the new config. (done)
+- Windows wiring: `http_proxy`/`https_proxy`/`no_proxy` are set before `WKContext` creation (the WinCairo curl backend reads the environment); DoH goes through WinHTTP; proxy settings apply at startup, a restart is required after changes. (done)
+- Test suite 322 → 386 checks: proxy config keys, proxy URL parsing, resolver behavior (cache, failure, NXDOMAIN) and loopback integration tests — blocked CONNECT and GET, subdomain blocking, bidirectional tunnel echo, request forwarding with origin-form rewrite, upstream-chained tunnel and forward, fail-closed 502 on DoH failure. (done)
+- Honest limits: HTTPS blocking is connection-level (authority from CONNECT — no URL inspection without interception), plain HTTP blocking is request-level; `upstream`-only mode bypasses the local engine (no blocking, no DoH there); the Windows curl proxy hook is compile-verified but cannot execute in CI (no WinCairo runtime on runners).
+
 ## K1 — Kiwi browser
 
 - The product browser lives in the separate [Kiwi](https://github.com/mel0k1/Kiwi) repository; mustela-shell stays the engine's test harness.

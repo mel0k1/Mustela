@@ -8,9 +8,9 @@ Every source file was re-read against two questions: does the engine expose this
 
 ## What exists today
 
-- Core: TOML settings, privacy policy with per-site rules, permission policy with per-site grants, fingerprint budget, tracking blocklist, DoH wire codec, session store, history, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log), `ui_text` sanitization for dialog text, find queries and download names. 322-check test suite.
-- GTK shell: tabs, URL bar with search fallback, private toggle, history window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model, popups as tabs, native JS dialogs, find-in-page, status link preview, downloads, zoom, permission prompts, TLS certificate prompt, HTTP auth prompt, crash recovery, Mustela context menu, fullscreen (F11 + HTML5), session restore, GPC script, tracker blocklist filter.
-- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies), popups via `WKPageUIClient` V6, dialog listeners, `WKPageFindClient` find bar, link preview, downloads, zoom, permission prompts, HTTP auth prompt, crash recovery, Mustela context menu, F11 fullscreen, session restore, GPC script, tracker blocklist filter.
+- Core: TOML settings, privacy policy with per-site rules, permission policy with per-site grants, fingerprint budget, tracking blocklist, DoH wire codec, DoH resolver and local proxy engine, session store, history, browsing-data kinds, URL normalization, perf module (budgets, sampling, stats, JSONL log), `ui_text` sanitization for dialog text, find queries and download names. 386-check test suite.
+- GTK shell: tabs, URL bar with search fallback, private toggle, history window, site-rules window, clear-data, settings/site-rules hot-reload, startup budget, memory ceiling, process model, popups as tabs, native JS dialogs, find-in-page, status link preview, downloads, zoom, permission prompts, TLS certificate prompt, HTTP auth prompt, crash recovery, Mustela context menu, fullscreen (F11 + HTML5), session restore, GPC script, tracker blocklist filter, engine routing through the local proxy (blocking + DoH + upstream).
+- Win shell: same feature set on the WinCairo C API minus the site-rules window (edit `sites.toml`, hot-reload applies), popups via `WKPageUIClient` V6, dialog listeners, `WKPageFindClient` find bar, link preview, downloads, zoom, permission prompts, HTTP auth prompt, crash recovery, Mustela context menu, F11 fullscreen, session restore, GPC script, tracker blocklist filter, engine routing through the local proxy via environment variables (WinHTTP DoH transport).
 - Bench: `mustela-bench` (GTK, runs in CI under xvfb) and `mustela-bench-win` (WinCairo, hidden host window; compiled in CI, executed on demand).
 - CI: three green tracks — Linux full build + tests + bench, Windows core tests, Windows shell and bench compile against 88 pinned upstream headers.
 
@@ -39,8 +39,8 @@ The privacy core is the product's identity; these are the next honest wins.
 
 - Global Privacy Control. ~~Neither port sends a `Sec-GPC` header nor exposes `navigator.globalPrivacyControl`.~~ — done in M6: `privacy.gpc` (on by default) injects the JS property through a document-start user script on both ports, and a GTK web-process extension (`src/webext/gtk`) adds `Sec-GPC: 1` to every request; the WinCairo C API has no request-header surface, so Windows ships the JS side only.
 - Tracking-domain blocklist. ~~Both ports already run compiled content filters...~~ — done in M6: `blocklist.hpp` ships ~60 built-in tracker domains plus an optional `privacy.blocklist_file`, compiled per profile through the existing content-filter machinery on both ports.
-- DNS-over-HTTPS. The core now carries an RFC 8484 codec (`doh.hpp`: query build, compressed response parse, base64url `query_uri`) and the `privacy.dns_over_https` setting, but neither WebKitGTK nor the WinCairo C API exposes a resolver hook — runtime wiring is deferred to a proxy milestone. (core groundwork done, port wiring blocked upstream)
-- Proxy. No proxy settings surface despite both WebKit flavors supporting one. (port)
+- DNS-over-HTTPS. The core carries an RFC 8484 codec (`doh.hpp`) and now a runtime resolver (`DohResolver` in `proxy_server.hpp`): when the engine routes through the local proxy (`proxy.mode = "local"`) and `privacy.dns_over_https` is set, every name the proxy connects to resolves through the configured DoH server — TLS to the resolver comes from the port transport (libsoup on GTK, WinHTTP on Windows), failures fail closed, and results are TTL-cached. Content-filter-based blocking additionally stays active on both ports. — done in M7
+- Proxy. ~~No proxy settings surface despite both WebKit flavors supporting one.~~ — done in M7: the core ships a loopback proxy engine (`proxy.mode = "local"`) and upstream chaining (`proxy.mode = "upstream"`, `proxy.upstream` with optional Basic auth); GTK applies it through `webkit_website_data_manager_set_network_proxy_settings`, Windows through the curl backend's proxy environment variables.
 - Public suffix awareness in `SiteRules`. `host_from_uri` does plain suffix matching: a rule for `example.org` correctly covers `www.example.org`, but a rule for a registry suffix (e.g. `co.uk`) would over-match. The core needs a bundled public-suffix list or a conservative "no registry-suffix rules" guard. (core)
 - Per-origin cookie wipe parity. GTK wipes cookies for a denied origin; the WinCairo C API has no per-origin removal, so Windows denial rides the global accept policy. Recheck upstream: if `WKWebsiteDataStoreRemoveData` grows origin filtering, port it. (port, upstream-dependent)
 - Disk cache clearing on Windows. `ClearRequest` covers cookies and storage on Win but not the network cache; the C API lacks the call. (port, upstream-dependent)
@@ -95,6 +95,7 @@ Leftovers from M4 plus what the bench variant opened up.
 | Session restore | yes (full history) | yes (tab URLs) |
 | GPC (Sec-GPC header + JS) | yes (web extension) | JS only (no C API header surface) |
 | Tracker blocklist | yes | yes |
+| Local proxy: network blocking + DoH | yes (`proxy.mode`) | yes (env hook, startup only) |
 | Bench | GTK, runs in CI | WinCairo, compile-checked in CI |
 
 ## Build and CI gaps
@@ -107,6 +108,7 @@ Leftovers from M4 plus what the bench variant opened up.
 ## Suggested order
 
 1. M5 — browsing platform basics: shipped in full — popups, JS dialogs, find-in-page, link preview, downloads, zoom, permission policy with per-site memory, certificate/auth surface, crash recovery.
-2. M6 — privacy deepening: shipped — GPC (JS both ports, Sec-GPC header on GTK via a web extension), tracking-domain blocklist compiled into content filters on both ports, DoH wire codec + setting in the core (runtime resolver hook blocked on upstream APIs), fullscreen, Mustela context menus and session restore on both ports; leftovers: public-suffix guard in site rules, settings load report.
-3. K1 — Kiwi consumes the declared public core surface (profiles, per-site policy UI) while the shell harness keeps parity work behind it.
-4. Ongoing: release/packaging job as soon as Windows runtime story settles; a local-proxy milestone would close secure-DNS wiring, the proxy gap and stronger request-level blocking at once.
+2. M6 — privacy deepening: shipped — GPC (JS both ports, Sec-GPC header on GTK via a web extension), tracking-domain blocklist compiled into content filters on both ports, DoH wire codec + setting in the core, fullscreen, Mustela context menus and session restore on both ports; leftovers: public-suffix guard in site rules, settings load report.
+3. M7 — local proxy network layer: shipped — loopback proxy engine in the core (CONNECT tunneling, request-level and connection-level blocklist enforcement, upstream chaining, DoH resolver with injected transport), GTK routing through `WebKitNetworkProxySettings`, Windows routing through the curl proxy environment, 386-check suite with loopback integration tests.
+4. K1 — Kiwi consumes the declared public core surface (profiles, per-site policy UI) while the shell harness keeps parity work behind it.
+5. Ongoing: release/packaging job as soon as Windows runtime story settles.

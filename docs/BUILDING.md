@@ -66,7 +66,11 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | privacy.gpc | true | expose `navigator.globalPrivacyControl` and send `Sec-GPC: 1` on every request (GTK; Windows ships the JS side) |
 | privacy.blocklist | true | block ~60 built-in tracker/ad domains through a compiled content filter |
 | privacy.blocklist_file | (empty) | optional file with extra domains, one per line, `#` comments allowed |
-| privacy.dns_over_https | (empty) | DoH resolver URL (RFC 8484); recorded for future runtime wiring — no WebKit flavor exposes a resolver hook yet |
+| privacy.dns_over_https | (empty) | DoH resolver URL (RFC 8484); with `proxy.mode = "local"` the proxy resolves every host through it and fails closed when it cannot |
+| proxy.mode | off | `off` (direct), `local` (engine-internal loopback proxy: blocklist at connection level, plain-HTTP request checks, DoH resolution, optional upstream chaining) or `upstream` (route through `proxy.upstream` directly) |
+| proxy.upstream | (empty) | upstream proxy URL `http://host:port` — chained by the local proxy in `local` mode, used directly in `upstream` mode |
+| proxy.user | (empty) | upstream proxy user (HTTP Basic) |
+| proxy.password | (empty) | upstream proxy password; stored in `settings.toml` in plaintext — keep the profile directory private |
 | perf.process_model | per-view | `per-view` (one web process per view, upstream default) or `shared` (a single shared web process — lower memory, weaker site isolation, applies at startup) |
 | perf.startup_budget_ms | 0 | startup budget; `0` disables the check, otherwise the shell flashes `startup Nms over budget` when the time to first mapped window exceeds it |
 | perf.memory_ceiling_mb | 0 | process-tree RSS ceiling; `0` disables monitoring, otherwise the status bar shows `mem N MB` while the ceiling is exceeded |
