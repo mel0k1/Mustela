@@ -2,6 +2,7 @@
 #include <webkit2/webkit2.h>
 #include <libsoup/soup.h>
 #include <glib/gstdio.h>
+#include <cairo/cairo.h>
 
 #include <dirent.h>
 #include <unistd.h>
@@ -18,7 +19,9 @@
 
 #include "browsing_data.hpp"
 #include "blocklist.hpp"
+#include "bookmarks.hpp"
 #include "config.hpp"
+#include "error_page.hpp"
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
 #include "perf.hpp"
@@ -61,8 +64,13 @@ struct Browser {
     GtkWidget* forward_btn = nullptr;
     GtkWidget* reload_btn = nullptr;
     GtkWidget* private_toggle = nullptr;
+    GtkWidget* bookmark_btn = nullptr;
+    bool bookmark_marked = false;
     GtkWidget* status_label = nullptr;
     GtkWidget* history_window = nullptr;
+    GtkWidget* bookmarks_window = nullptr;
+    GtkWidget* bookmarks_tree = nullptr;
+    GtkListStore* bookmarks_store = nullptr;
     GtkWidget* find_bar = nullptr;
     GtkWidget* find_entry = nullptr;
     GtkWidget* find_label = nullptr;
@@ -71,6 +79,7 @@ struct Browser {
     WebKitWebContext* normal_context = nullptr;
     WebKitWebContext* private_context = nullptr;
     std::unique_ptr<mustela::HistoryStore> history;
+    std::unique_ptr<mustela::BookmarkStore> bookmarks;
     std::unique_ptr<mustela::SiteRules> sites;
     GtkWidget* rules_window = nullptr;
     GtkWidget* rules_tree = nullptr;
@@ -84,6 +93,7 @@ struct Browser {
     WebKitUserContentFilter* blocklist_filter = nullptr;
     std::unique_ptr<mustela::ProxyServer> proxy;
     std::string session_path;
+    std::string favicons_dir;
     std::unique_ptr<mustela::PerfLog> perf;
     std::int64_t memory_bytes = 0;
     bool memory_over = false;
@@ -100,6 +110,9 @@ void close_tab(Browser& b, Tab* tab);
 GtkWidget* build_tab_label(Browser& b, Tab* tab);
 void on_close_tab_clicked(GtkButton*, gpointer user_data);
 void open_history_window(Browser& b);
+void open_bookmarks_window(Browser& b);
+void toggle_bookmark(Browser& b);
+void show_devtools(Browser& b);
 void open_site_rules_window(Browser& b);
 void clear_browsing_data(Browser& b);
 void apply_policies_to_tabs(Browser& b);
@@ -281,6 +294,13 @@ void refresh_chrome(Browser& b) {
         gtk_widget_set_sensitive(b.reload_btn, !tab->uri().empty());
         update_tab_label(b, tab);
     }
+    bool marked = tab && b.bookmarks && b.bookmarks->contains(tab->uri());
+    if (b.bookmark_btn && marked != b.bookmark_marked) {
+        b.bookmark_marked = marked;
+        gtk_button_set_image(GTK_BUTTON(b.bookmark_btn),
+            gtk_image_new_from_icon_name(marked ? "starred-symbolic" : "non-starred-symbolic",
+                GTK_ICON_SIZE_BUTTON));
+    }
     gtk_notebook_set_show_tabs(GTK_NOTEBOOK(b.notebook), gtk_notebook_get_n_pages(GTK_NOTEBOOK(b.notebook)) > 1);
     update_window_title(b);
     refresh_status(b);
@@ -415,13 +435,15 @@ void apply_cookie_policy(WebKitWebContext* context, CookiePolicy policy) {
     webkit_cookie_manager_set_accept_policy(manager, accept);
 }
 
-void harden_view(WebKitWebView* view, const Hardening& hard) {
+void harden_view(Browser& b, WebKitWebView* view) {
     WebKitSettings* settings = webkit_web_view_get_settings(view);
+    const Hardening& hard = b.privacy.hardening;
     g_object_set(settings,
         "enable-javascript", hard.javascript ? TRUE : FALSE,
         "enable-hyperlink-auditing", hard.hyperlink_auditing ? TRUE : FALSE,
         "enable-dns-prefetching", hard.dns_prefetching ? TRUE : FALSE,
         "media-playback-requires-user-gesture", hard.autoplay_blocked ? TRUE : FALSE,
+        "enable-developer-extras", b.settings.devtools ? TRUE : FALSE,
         nullptr);
 }
 
@@ -467,7 +489,7 @@ void apply_view_policy(Browser& b, WebKitWebView* view, const std::string& uri) 
 
 void apply_policies_to_tabs(Browser& b) {
     for (std::unique_ptr<Tab>& tab : b.tabs) {
-        harden_view(tab->view(), b.privacy.hardening);
+        harden_view(b, tab->view());
         apply_view_policy(b, tab->view(), tab->uri());
     }
 }
@@ -772,6 +794,19 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
         open_history_window(b);
         return TRUE;
     }
+    if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_d) {
+        toggle_bookmark(b);
+        return TRUE;
+    }
+    if (mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && event->keyval == GDK_KEY_O) {
+        open_bookmarks_window(b);
+        return TRUE;
+    }
+    if ((mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && event->keyval == GDK_KEY_I)
+        || (mods == 0 && event->keyval == GDK_KEY_F12)) {
+        show_devtools(b);
+        return TRUE;
+    }
     if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_r) {
         if (tab) webkit_web_view_reload(tab->view());
         return TRUE;
@@ -852,6 +887,10 @@ void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_d
     Tab* tab = static_cast<Tab*>(user_data);
     if (event == WEBKIT_LOAD_STARTED) {
         tab->load.start(mustela::Stopwatch::now_ms());
+        if (tab->error_page && tab->uri() != tab->error_page_uri) {
+            tab->error_page = false;
+            tab->error_page_uri.clear();
+        }
     }
     if (event == WEBKIT_LOAD_COMMITTED) {
         apply_view_policy(*browser, tab->view(), tab->uri());
@@ -860,27 +899,60 @@ void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_d
         gtk_entry_set_progress_fraction(GTK_ENTRY(browser->url_entry), 0.0);
         tab->crashes = 0;
         double elapsed = tab->load.stop(mustela::Stopwatch::now_ms());
-        if (elapsed >= 0.0 && !tab->uri().empty()) {
-            record_perf(*browser, "pageload", elapsed, 0, tab->uri());
-        }
-        if (tab && browser->history) {
-            std::string uri = tab->uri();
-            if (!uri.empty() && browser->privacy.records_history(tab->privacy())) {
-                browser->history->record(uri, tab->title(), static_cast<std::int64_t>(std::time(nullptr)));
+        if (!tab->error_page) {
+            if (elapsed >= 0.0 && !tab->uri().empty()) {
+                record_perf(*browser, "pageload", elapsed, 0, tab->uri());
             }
-        }
-        if (tab && !tab->is_private() && browser->sites) {
-            mustela::SiteDecision decision = mustela::resolve_site(browser->privacy, *browser->sites, tab->uri());
-            if (decision.cookies_denied) deny_origin_cookies(*browser, tab->uri());
+            if (tab && browser->history) {
+                std::string uri = tab->uri();
+                if (!uri.empty() && browser->privacy.records_history(tab->privacy())) {
+                    browser->history->record(uri, tab->title(), static_cast<std::int64_t>(std::time(nullptr)));
+                }
+            }
+            if (tab && !tab->is_private() && browser->sites) {
+                mustela::SiteDecision decision = mustela::resolve_site(browser->privacy, *browser->sites, tab->uri());
+                if (decision.cookies_denied) deny_origin_cookies(*browser, tab->uri());
+            }
         }
         save_session_now(*browser);
     }
     refresh_chrome(*browser);
 }
 
-void on_view_load_failed(WebKitWebView*, WebKitLoadEvent, const char*, GError*, gpointer user_data) {
+void on_view_load_failed(WebKitWebView* view, WebKitLoadEvent event, const char* failing_uri,
+    GError* error, gpointer user_data) {
     Tab* tab = static_cast<Tab*>(user_data);
     tab->load.cancel();
+    if (event != WEBKIT_LOAD_STARTED || !error || !failing_uri || !*failing_uri) return;
+    if (error->domain == webkit_network_error_quark()
+        && error->code == WEBKIT_NETWORK_ERROR_CANCELLED) return;
+    if (error->domain == webkit_policy_error_quark()
+        && error->code == WEBKIT_POLICY_ERROR_FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE) return;
+    const char* heading = "Load failed";
+    if (error->domain == webkit_policy_error_quark()) {
+        switch (error->code) {
+            case WEBKIT_POLICY_ERROR_CANNOT_SHOW_MIME_TYPE: heading = "Can't show this content"; break;
+            case WEBKIT_POLICY_ERROR_CANNOT_SHOW_URI: heading = "Unsupported address"; break;
+            case WEBKIT_POLICY_ERROR_CANNOT_USE_RESTRICTED_PORT: heading = "Port blocked"; break;
+            default: heading = "Navigation blocked"; break;
+        }
+    } else if (error->domain == webkit_plugin_error_quark()) {
+        heading = "Plug-in failure";
+    } else if (error->domain == webkit_network_error_quark()) {
+        switch (error->code) {
+            case WEBKIT_NETWORK_ERROR_UNKNOWN_PROTOCOL: heading = "Unsupported address"; break;
+            case WEBKIT_NETWORK_ERROR_FILE_DOES_NOT_EXIST: heading = "File not found"; break;
+            case WEBKIT_NETWORK_ERROR_FAILED:
+            case WEBKIT_NETWORK_ERROR_TRANSPORT: heading = "Could not connect"; break;
+            default: break;
+        }
+    }
+    std::string html = mustela::branded_error_page(heading,
+        error->message ? error->message : "", failing_uri);
+    webkit_web_view_load_alternate_html(view, html.c_str(), failing_uri, nullptr);
+    tab->error_page = true;
+    tab->error_page_uri = failing_uri;
+    flash_status(heading);
 }
 
 void on_go_back(GtkButton*, gpointer) {
@@ -995,7 +1067,7 @@ GtkWidget* on_view_create(WebKitWebView* view, WebKitNavigationAction* action, g
     Tab* origin = tab_from_view(b, view);
     bool priv = origin ? origin->is_private() : b.privacy.default_private == TabPrivacy::Private;
     WebKitWebView* related = WEBKIT_WEB_VIEW(webkit_web_view_new_with_related_view(view));
-    harden_view(related, b.privacy.hardening);
+    harden_view(b, related);
     webkit_web_view_set_zoom_level(related, b.settings.zoom_default);
     WebKitURIRequest* request = webkit_navigation_action_get_request(action);
     const gchar* target = request ? webkit_uri_request_get_uri(request) : nullptr;
@@ -1362,12 +1434,34 @@ gboolean on_leave_fullscreen(WebKitWebView*, gpointer) {
     return FALSE;
 }
 
+void on_favicon_available(WebKitWebView* view, GParamSpec*, gpointer user_data) {
+    Browser& b = *browser;
+    Tab* tab = static_cast<Tab*>(user_data);
+    if (!tab || !tab->icon()) return;
+    cairo_surface_t* surface = webkit_web_view_get_favicon(view);
+    if (!surface) {
+        gtk_image_clear(GTK_IMAGE(tab->icon()));
+        gtk_widget_hide(tab->icon());
+        return;
+    }
+    if (!tab->is_private() && !b.favicons_dir.empty()) {
+        std::string host = mustela::host_from_uri(tab->uri());
+        std::string name = mustela::sanitize_filename(host);
+        if (!host.empty() && !name.empty()) {
+            cairo_surface_write_to_png(surface, (b.favicons_dir + "/" + name + ".png").c_str());
+        }
+    }
+    gtk_image_set_from_surface(GTK_IMAGE(tab->icon()), surface);
+    gtk_widget_show(tab->icon());
+}
+
 void connect_tab_signals(Tab* tab) {
     g_signal_connect(tab->view(), "notify::uri", G_CALLBACK(on_view_uri_changed), tab);
     g_signal_connect(tab->view(), "notify::title", G_CALLBACK(on_view_title_changed), tab);
     g_signal_connect(tab->view(), "notify::estimated-load-progress", G_CALLBACK(on_view_progress_changed), tab);
     g_signal_connect(tab->view(), "load-changed", G_CALLBACK(on_view_load_changed), tab);
     g_signal_connect(tab->view(), "load-failed", G_CALLBACK(on_view_load_failed), tab);
+    g_signal_connect(tab->view(), "notify::favicon", G_CALLBACK(on_favicon_available), tab);
     g_signal_connect(tab->view(), "create", G_CALLBACK(on_view_create), nullptr);
     g_signal_connect(tab->view(), "ready-to-show", G_CALLBACK(on_view_ready_to_show), nullptr);
     g_signal_connect(tab->view(), "close", G_CALLBACK(on_view_close), tab);
@@ -1404,6 +1498,8 @@ void close_tab(Browser& b, Tab* tab) {
 
 GtkWidget* build_tab_label(Browser&, Tab* tab) {
     GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    GtkWidget* icon = gtk_image_new();
+    tab->set_icon(icon);
     GtkWidget* label = gtk_label_new(tab_label_text(*tab).c_str());
     gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
     gtk_label_set_width_chars(GTK_LABEL(label), 18);
@@ -1414,6 +1510,7 @@ GtkWidget* build_tab_label(Browser&, Tab* tab) {
     gtk_widget_set_valign(close_btn, GTK_ALIGN_CENTER);
     g_signal_connect(close_btn, "clicked", G_CALLBACK(on_close_tab_clicked), tab);
 
+    gtk_box_pack_start(GTK_BOX(box), icon, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), label, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(box), close_btn, FALSE, FALSE, 0);
     gtk_widget_show_all(box);
@@ -1424,7 +1521,7 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     bool priv = b.privacy.tab_privacy(request) == TabPrivacy::Private;
     WebKitWebContext* context = priv ? b.private_context : b.normal_context;
     WebKitWebView* view = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(context));
-    harden_view(view, b.privacy.hardening);
+    harden_view(b, view);
     webkit_web_view_set_zoom_level(view, b.settings.zoom_default);
     apply_view_policy(b, view, url ? url : "");
     Tab* tab = new Tab(view, priv);
@@ -1710,6 +1807,153 @@ void open_site_rules_window(Browser& b) {
     gtk_widget_show_all(window);
 }
 
+enum BookmarkCols {
+    BMK_TITLE,
+    BMK_URL
+};
+
+void on_bookmarks_destroy(GtkWidget*, gpointer) {
+    if (browser) {
+        browser->bookmarks_window = nullptr;
+        browser->bookmarks_tree = nullptr;
+        browser->bookmarks_store = nullptr;
+    }
+}
+
+void reload_bookmarks_model(GtkListStore* store) {
+    gtk_list_store_clear(store);
+    if (!browser || !browser->bookmarks) return;
+    for (const mustela::BookmarkEntry& entry : browser->bookmarks->entries()) {
+        GtkTreeIter iter;
+        gtk_list_store_append(store, &iter);
+        gtk_list_store_set(store, &iter,
+            BMK_TITLE, entry.title.c_str(),
+            BMK_URL, entry.url.c_str(), -1);
+    }
+}
+
+std::string selected_bookmark_url() {
+    if (!browser->bookmarks_tree) return std::string();
+    GtkTreeSelection* selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(browser->bookmarks_tree));
+    GtkTreeModel* model = nullptr;
+    GtkTreeIter iter;
+    if (!gtk_tree_selection_get_selected(selection, &model, &iter)) return std::string();
+    gchar* url = nullptr;
+    gtk_tree_model_get(model, &iter, BMK_URL, &url, -1);
+    std::string out = url ? url : "";
+    g_free(url);
+    return out;
+}
+
+void on_bookmarks_row_activated(GtkTreeView* tree, GtkTreePath* path, GtkTreeViewColumn*, gpointer) {
+    GtkTreeModel* model = gtk_tree_view_get_model(tree);
+    GtkTreeIter iter;
+    if (!gtk_tree_model_get_iter(model, &iter, path)) return;
+    gchar* url = nullptr;
+    gtk_tree_model_get(model, &iter, BMK_URL, &url, -1);
+    if (url && *url) open_tab(*browser, url, browser->privacy.default_private);
+    g_free(url);
+}
+
+void on_bookmark_open_clicked(GtkButton*, gpointer) {
+    std::string url = selected_bookmark_url();
+    if (!url.empty()) open_tab(*browser, url.c_str(), browser->privacy.default_private);
+}
+
+void on_bookmark_remove_clicked(GtkButton*, gpointer) {
+    Browser& b = *browser;
+    std::string url = selected_bookmark_url();
+    if (url.empty() || !b.bookmarks) return;
+    b.bookmarks->remove(url);
+    if (b.bookmarks_store) reload_bookmarks_model(b.bookmarks_store);
+    refresh_chrome(b);
+    flash_status("bookmark removed");
+}
+
+void open_bookmarks_window(Browser& b) {
+    if (b.bookmarks_window) {
+        gtk_window_present(GTK_WINDOW(b.bookmarks_window));
+        return;
+    }
+
+    GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    b.bookmarks_window = window;
+    gtk_window_set_title(GTK_WINDOW(window), "Bookmarks — Mustela");
+    gtk_window_set_default_size(GTK_WINDOW(window), 640, 420);
+    gtk_window_set_transient_for(GTK_WINDOW(window), GTK_WINDOW(b.window));
+    g_signal_connect(window, "destroy", G_CALLBACK(on_bookmarks_destroy), nullptr);
+
+    GtkListStore* store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_STRING);
+    b.bookmarks_store = store;
+    reload_bookmarks_model(store);
+
+    GtkWidget* tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    g_object_unref(store);
+    b.bookmarks_tree = tree;
+    gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(tree), TRUE);
+    gtk_tree_selection_set_mode(gtk_tree_view_get_selection(GTK_TREE_VIEW(tree)), GTK_SELECTION_SINGLE);
+
+    GtkCellRenderer* renderer = gtk_cell_renderer_text_new();
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Title", renderer, "text", BMK_TITLE, nullptr);
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "URL", renderer, "text", BMK_URL, nullptr);
+    gtk_tree_view_column_set_expand(gtk_tree_view_get_column(GTK_TREE_VIEW(tree), BMK_TITLE), TRUE);
+    g_signal_connect(tree, "row-activated", G_CALLBACK(on_bookmarks_row_activated), nullptr);
+
+    GtkWidget* scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(scroll), tree);
+
+    GtkWidget* open_btn = gtk_button_new_with_label("Open");
+    g_signal_connect(open_btn, "clicked", G_CALLBACK(on_bookmark_open_clicked), nullptr);
+    GtkWidget* remove_btn = gtk_button_new_with_label("Remove");
+    g_signal_connect(remove_btn, "clicked", G_CALLBACK(on_bookmark_remove_clicked), nullptr);
+
+    GtkWidget* bottom = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_pack_start(GTK_BOX(bottom), open_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bottom), remove_btn, FALSE, FALSE, 0);
+
+    GtkWidget* layout = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_container_set_border_width(GTK_CONTAINER(layout), 4);
+    gtk_box_pack_start(GTK_BOX(layout), scroll, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(layout), bottom, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(window), layout);
+
+    gtk_widget_show_all(window);
+}
+
+void toggle_bookmark(Browser& b) {
+    Tab* tab = active_tab(b);
+    if (!tab || !b.bookmarks || tab->uri().empty()) return;
+    if (b.bookmarks->contains(tab->uri())) {
+        b.bookmarks->remove(tab->uri());
+        flash_status("bookmark removed");
+    } else {
+        b.bookmarks->add(tab->uri(), tab->title(), static_cast<std::int64_t>(std::time(nullptr)));
+        flash_status("bookmark added");
+    }
+    refresh_chrome(b);
+}
+
+void show_devtools(Browser& b) {
+    Tab* tab = active_tab(b);
+    if (!tab) return;
+    WebKitWebInspector* inspector = webkit_web_view_get_inspector(tab->view());
+    if (!inspector) return;
+    if (webkit_web_inspector_is_attached(inspector)) {
+        webkit_web_inspector_close(inspector);
+    } else {
+        webkit_web_inspector_show(inspector);
+    }
+}
+
+void on_bookmark_clicked(GtkButton*, gpointer) {
+    toggle_bookmark(*browser);
+}
+
+void on_devtools_clicked(GtkButton*, gpointer) {
+    show_devtools(*browser);
+}
+
 void report_settings_issues(const mustela::SettingsReport& report) {
     if (report.unknown_keys.empty() && report.invalid_values.empty() && report.warnings.empty()) return;
     g_print("mustela: settings %s\n", report.summary().c_str());
@@ -1834,6 +2078,7 @@ int mustela_main(int argc, char** argv) {
         browser->history = std::make_unique<mustela::HistoryStore>(history_path);
         g_free(history_path);
     }
+    browser->bookmarks = std::make_unique<mustela::BookmarkStore>(std::string(profile_dir) + "/bookmarks.tsv");
 
     gchar* filters_dir = g_build_filename(profile_dir, "filters", nullptr);
     g_mkdir_with_parents(filters_dir, 0700);
@@ -1855,6 +2100,9 @@ int mustela_main(int argc, char** argv) {
     browser->normal_context = webkit_web_context_new_with_website_data_manager(data_manager);
     g_object_unref(data_manager);
     browser->private_context = webkit_web_context_new_ephemeral();
+    browser->favicons_dir = std::string(profile_dir) + "/favicons";
+    g_mkdir_with_parents(browser->favicons_dir.c_str(), 0700);
+    webkit_web_context_set_favicon_database_directory(browser->normal_context, browser->favicons_dir.c_str());
     apply_process_model(browser->normal_context, browser->settings.process_model);
     apply_process_model(browser->private_context, browser->settings.process_model);
     apply_cookie_policy(browser->normal_context, browser->privacy.cookies);
@@ -1906,6 +2154,10 @@ int mustela_main(int argc, char** argv) {
     gtk_widget_set_tooltip_text(browser->status_label,
         "Cookie policy, tracking prevention and fingerprint budget. Ctrl+Shift+Del clears browsing data");
     GtkWidget* new_tab_btn = gtk_button_new_from_icon_name("tab-new-symbolic", GTK_ICON_SIZE_BUTTON);
+    browser->bookmark_btn = gtk_button_new_from_icon_name("non-starred-symbolic", GTK_ICON_SIZE_BUTTON);
+    gtk_button_set_relief(GTK_BUTTON(browser->bookmark_btn), GTK_RELIEF_NONE);
+    gtk_widget_set_focus_on_click(browser->bookmark_btn, FALSE);
+    gtk_widget_set_tooltip_text(browser->bookmark_btn, "Bookmark this page (Ctrl+D)");
 
     GtkWidget* toolbar_buttons[] = {browser->back_btn, browser->forward_btn, browser->reload_btn, new_tab_btn};
     for (GtkWidget* btn : toolbar_buttons) {
@@ -1921,6 +2173,7 @@ int mustela_main(int argc, char** argv) {
     gtk_box_pack_start(GTK_BOX(toolbar), browser->reload_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), browser->private_toggle, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), browser->url_entry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(toolbar), browser->bookmark_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), new_tab_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), browser->status_label, FALSE, FALSE, 0);
 
@@ -1967,6 +2220,7 @@ int mustela_main(int argc, char** argv) {
     g_signal_connect(browser->reload_btn, "clicked", G_CALLBACK(on_reload), nullptr);
     g_signal_connect(browser->private_toggle, "toggled", G_CALLBACK(on_private_toggled), nullptr);
     g_signal_connect(new_tab_btn, "clicked", G_CALLBACK(on_new_tab), nullptr);
+    g_signal_connect(browser->bookmark_btn, "clicked", G_CALLBACK(on_bookmark_clicked), nullptr);
     g_signal_connect(browser->url_entry, "activate", G_CALLBACK(on_url_activate), nullptr);
     g_signal_connect(browser->notebook, "switch-page", G_CALLBACK(on_switch_page), nullptr);
     g_signal_connect(browser->notebook, "page-removed", G_CALLBACK(on_page_removed), nullptr);
