@@ -1,5 +1,6 @@
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
+#include <libsoup/soup.h>
 #include <glib/gstdio.h>
 
 #include <dirent.h>
@@ -10,6 +11,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -22,6 +24,7 @@
 #include "perf.hpp"
 #include "permissions.hpp"
 #include "privacy.hpp"
+#include "proxy_server.hpp"
 #include "session.hpp"
 #include "site_rules.hpp"
 #include "tab.hpp"
@@ -79,6 +82,7 @@ struct Browser {
     WebKitUserContentFilterStore* filter_store = nullptr;
     WebKitUserContentFilter* fonts_filter = nullptr;
     WebKitUserContentFilter* blocklist_filter = nullptr;
+    std::unique_ptr<mustela::ProxyServer> proxy;
     std::string session_path;
     std::unique_ptr<mustela::PerfLog> perf;
     std::int64_t memory_bytes = 0;
@@ -323,6 +327,84 @@ void apply_tls_policy(Browser& b) {
     for (WebKitWebsiteDataManager* manager : managers) {
         webkit_website_data_manager_set_tls_errors_policy(manager, policy);
     }
+}
+
+bool doh_transport_soup(const std::string& url, const std::vector<unsigned char>& query,
+    std::vector<unsigned char>& answer) {
+    static std::mutex mutex;
+    static SoupSession* session = soup_session_new();
+    std::lock_guard<std::mutex> lock(mutex);
+    SoupMessage* message = soup_message_new(SOUP_METHOD_POST, url.c_str());
+    if (!message) return false;
+    GBytes* body = g_bytes_new(query.data(), query.size());
+    soup_message_set_request_body_from_bytes(message, "application/dns-message", body);
+    GError* error = nullptr;
+    GInputStream* stream = soup_session_send(session, message, nullptr, &error);
+    if (!stream) {
+        if (error) g_error_free(error);
+        g_object_unref(message);
+        g_bytes_unref(body);
+        return false;
+    }
+    bool ok = false;
+    if (SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(message))) {
+        std::vector<unsigned char> data;
+        char buffer[8192];
+        gssize got = 0;
+        while ((got = g_input_stream_read(stream, buffer, sizeof(buffer), nullptr, nullptr)) > 0) {
+            data.insert(data.end(), buffer, buffer + got);
+            if (data.size() > 65536) break;
+        }
+        if (got == 0 && !data.empty()) {
+            answer = std::move(data);
+            ok = true;
+        }
+    }
+    g_object_unref(stream);
+    g_object_unref(message);
+    g_bytes_unref(body);
+    return ok;
+}
+
+void apply_proxy(Browser& b) {
+    const char* ignore_hosts[] = {"localhost", "127.0.0.1", "::1", nullptr};
+    WebKitNetworkProxyMode mode = WEBKIT_NETWORK_PROXY_MODE_DEFAULT;
+    WebKitNetworkProxySettings* proxy_settings = nullptr;
+    if (b.settings.proxy_mode == "local") {
+        mustela::Blocklist list = mustela::default_blocklist(b.settings.blocklist_file);
+        if (!b.privacy.blocklist) list.clear();
+        mustela::ProxyConfig config;
+        config.resolve_via_doh = !b.settings.dns_over_https.empty();
+        config.doh_url = b.settings.dns_over_https;
+        mustela::ProxyEndpoint endpoint;
+        if (!b.settings.proxy_upstream.empty() && mustela::parse_proxy_url(b.settings.proxy_upstream, endpoint)) {
+            config.has_upstream = true;
+            config.upstream = endpoint;
+        }
+        if (!b.proxy) b.proxy = std::make_unique<mustela::ProxyServer>();
+        if (b.proxy->start(config, list, doh_transport_soup)) {
+            std::string url = "http://127.0.0.1:" + std::to_string(b.proxy->port());
+            proxy_settings = webkit_network_proxy_settings_new(url.c_str(), ignore_hosts);
+            mode = WEBKIT_NETWORK_PROXY_MODE_CUSTOM;
+        } else {
+            b.proxy.reset();
+        }
+    } else if (b.settings.proxy_mode == "upstream") {
+        mustela::ProxyEndpoint endpoint;
+        if (mustela::parse_proxy_url(b.settings.proxy_upstream, endpoint)) {
+            std::string url = mustela::proxy_url_from(endpoint);
+            proxy_settings = webkit_network_proxy_settings_new(url.c_str(), ignore_hosts);
+            mode = WEBKIT_NETWORK_PROXY_MODE_CUSTOM;
+        }
+    }
+    WebKitWebsiteDataManager* managers[] = {
+        webkit_web_context_get_website_data_manager(b.normal_context),
+        webkit_web_context_get_website_data_manager(b.private_context)
+    };
+    for (WebKitWebsiteDataManager* manager : managers) {
+        webkit_website_data_manager_set_network_proxy_settings(manager, mode, proxy_settings);
+    }
+    if (proxy_settings) webkit_network_proxy_settings_free(proxy_settings);
 }
 
 void apply_cookie_policy(WebKitWebContext* context, CookiePolicy policy) {
@@ -1642,6 +1724,7 @@ gboolean do_settings_reload(gpointer) {
     WebKitWebsiteDataManager* manager = webkit_web_context_get_website_data_manager(b.normal_context);
     webkit_website_data_manager_set_itp_enabled(manager, b.privacy.hardening.tracking_prevention ? TRUE : FALSE);
     apply_tls_policy(b);
+    apply_proxy(b);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(b.private_toggle), b.privacy.default_private == TabPrivacy::Private);
 
     if (b.privacy.history_enabled && !b.history) {
@@ -1759,6 +1842,7 @@ int mustela_main(int argc, char** argv) {
     apply_cookie_policy(browser->normal_context, browser->privacy.cookies);
     apply_cookie_policy(browser->private_context, browser->privacy.cookies);
     apply_tls_policy(*browser);
+    apply_proxy(*browser);
     webkit_web_context_set_web_extensions_directory(browser->normal_context, MUSTELA_WEBEXT_DIR);
     webkit_web_context_set_web_extensions_directory(browser->private_context, MUSTELA_WEBEXT_DIR);
     webkit_web_context_set_web_extensions_initialization_user_data(browser->normal_context,
