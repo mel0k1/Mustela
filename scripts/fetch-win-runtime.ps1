@@ -56,29 +56,42 @@ function Get-LatestRequirementsAssetUrl {
 }
 
 function Get-BuildbotArchiveUrl {
-    # Resolve builder id, then the build, then look for an s3:// style artifact URL
-    # in the build's properties/logs (the "upload"/"transfer-to-s3" step).
-    $builders = Invoke-RestMethod -Uri "https://build.webkit.org/api/v2/builders?name=$([Uri]::EscapeDataString($Builder))"
+    # Resolve the builder, latest green build, then construct the public S3 archive URL
+    # from the build properties (identifier = fullPlatform-archForUpload-configuration,
+    # archive_revision = "NNNNNN@branch") and verify it with a HEAD request.
+    $builders = Invoke-RestMethod -Headers @{ "User-Agent" = "mustela-fetch-win-runtime" } `
+        -Uri "https://build.webkit.org/api/v2/builders?name=$([Uri]::EscapeDataString($Builder))"
     if (-not $builders.builders -or $builders.builders.Count -eq 0) {
         throw "builder '$Builder' not found on build.webkit.org"
     }
     $builderId = $builders.builders[0].builderid
     $query = "https://build.webkit.org/api/v2/builds?builderid=$builderId&order=-number&limit=20"
     if ($BuildNumber -gt 0) { $query += "&number=$BuildNumber" }
-    $builds = Invoke-RestMethod -Uri $query
+    $builds = Invoke-RestMethod -Headers @{ "User-Agent" = "mustela-fetch-win-runtime" } -Uri $query
     foreach ($build in $builds.builds) {
         if ($build.results -ne 0) { continue }   # 0 = success ("green")
-        $steps = Invoke-RestMethod -Uri "https://build.webkit.org/api/v2/steps?buildid=$($build.buildid)"
-        foreach ($step in $steps.steps) {
-            if ($step.name -notmatch "upload|transfer|archive|s3") { continue }
-            $logs = Invoke-RestMethod -Uri "https://build.webkit.org/api/v2/logs?stepid=$($step.stepid)"
-            foreach ($log in $logs.logs) {
-                $body = (Invoke-WebRequest -UseBasicParsing -Uri $log.url).Content
-                $match = [regex]::Match($body, "https?://[^\s`"']+\.zip")
-                if ($match.Success) { return $match.Value }
+        $props = Invoke-RestMethod -Headers @{ "User-Agent" = "mustela-fetch-win-runtime" } `
+            -Uri "https://build.webkit.org/api/v2/builds/$($build.buildid)/properties"
+        $p = $props.properties[0]
+        $revision = $p.'archive_revision'[0]
+        $identifier = "$($p.'fullPlatform'[0])-$($p.'archForUpload'[0])-$($p.'configuration'[0])"
+        if (-not $revision) {
+            throw "build #$($build.number) has no archive_revision property"
+        }
+        $base = "https://s3-us-west-2.amazonaws.com/archives.webkit.org"
+        $candidates = @(
+            "$base/$identifier/$revision.zip",
+            "$base/$identifier-$Builder/$revision.zip"
+        )
+        foreach ($candidate in $candidates) {
+            try {
+                $head = Invoke-WebRequest -UseBasicParsing -Method Head -Uri $candidate -TimeoutSec 60
+                if ($head.StatusCode -eq 200) { return $candidate }
+            } catch {
+                Write-Host "no archive at $candidate"
             }
         }
-        throw "no archive URL found in the latest green build (#$($build.number))"
+        throw "no archive URL found for build #$($build.number) (revision $revision)"
     }
     throw "no green build found for builder '$Builder'"
 }
