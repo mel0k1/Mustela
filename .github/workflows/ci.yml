@@ -44,11 +44,7 @@ jobs:
         run: |
           LOG=build/Testing/Temporary/LastTest.log
           if [ -f "$LOG" ]; then
-            grep -E "^ +[0-9]+/[0-9]+ Test|ok [0-9]+ -|not ok" "$LOG" | head -40 | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-            echo "::error::--- tail ---"
-            tail -12 "$LOG" | while IFS= read -r line; do
+            grep -E "not ok|checks passed|Test Failed|timeout|Segmentation" "$LOG" | head -12 | while IFS= read -r line; do
               echo "::error::$line"
             done
           fi
