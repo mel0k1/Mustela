@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 
 namespace mustela {
 
@@ -64,6 +65,47 @@ bool newer_first(const AutofillEntry& a, const AutofillEntry& b) {
     return a.value < b.value;
 }
 
+std::string js_string(const std::string& text) {
+    std::string out;
+    out.reserve(text.size() + 8);
+    out.push_back('"');
+    static const char hex[] = "0123456789abcdef";
+    for (unsigned char c : text) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    out += "\\u00";
+                    out.push_back(hex[(c >> 4) & 0xF]);
+                    out.push_back(hex[c & 0xF]);
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+                break;
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+std::string entries_json(const std::vector<AutofillEntry>& entries) {
+    std::ostringstream out;
+    out << "[";
+    bool first = true;
+    for (const AutofillEntry& entry : entries) {
+        if (!first) out << ",";
+        first = false;
+        out << "{\"name\":" << js_string(entry.field)
+            << ",\"value\":" << js_string(entry.value) << "}";
+    }
+    out << "]";
+    return out.str();
+}
+
 }
 
 AutofillStore::AutofillStore(std::string path) : path_(std::move(path)) {}
@@ -123,6 +165,17 @@ std::vector<AutofillEntry> AutofillStore::find(const std::string& domain, const 
     return matches;
 }
 
+std::vector<AutofillEntry> AutofillStore::by_domain(const std::string& domain, size_t limit) const {
+    std::vector<AutofillEntry> matches;
+    for (const auto& entry : entries_) {
+        if (!domain_matches(entry.domain, domain)) continue;
+        matches.push_back(entry);
+    }
+    std::sort(matches.begin(), matches.end(), newer_first);
+    if (matches.size() > limit) matches.resize(limit);
+    return matches;
+}
+
 void AutofillStore::upsert(const std::string& domain, const std::string& field,
     const std::string& value, std::int64_t now) {
     if (domain.empty() || field.empty()) return;
@@ -155,6 +208,54 @@ bool AutofillStore::remove(const std::string& domain, const std::string& field,
 
 void AutofillStore::clear() {
     entries_.clear();
+}
+
+std::string autofill_fill_script(const std::vector<AutofillEntry>& entries) {
+    std::ostringstream out;
+    out << "(function(){var d=" << entries_json(entries) << ";var n=0;"
+        "var els=document.querySelectorAll('input,textarea');"
+        "for(var i=0;i<els.length;i++){"
+        "var el=els[i];if(!el||el.disabled||el.readOnly)continue;"
+        "var t=(el.type||'').toLowerCase();"
+        "if(t==='password'||t==='hidden'||t==='checkbox'||t==='radio'||t==='file'||"
+        "t==='submit'||t==='button'||t==='reset'||t==='image')continue;"
+        "var key=el.name||el.id;if(!key)continue;"
+        "if(el.value)continue;"
+        "for(var j=0;j<d.length;j++){"
+        "if(d[j].name!==key)continue;"
+        "el.value=d[j].value;"
+        "el.dispatchEvent(new Event('input',{bubbles:true}));"
+        "el.dispatchEvent(new Event('change',{bubbles:true}));"
+        "n++;break;"
+        "}"
+        "}"
+        "return n;})();";
+    return out.str();
+}
+
+const char* autofill_capture_script() {
+    return "(function(){"
+        "if(window.__mustelaFormCapture)return;window.__mustelaFormCapture=true;"
+        "document.addEventListener('submit',function(ev){"
+        "try{"
+        "var f=ev.target;if(!f||!f.elements)return;"
+        "var fs=[];"
+        "for(var i=0;i<f.elements.length;i++){"
+        "var el=f.elements[i];if(!el||!el.name||el.disabled)continue;"
+        "var t=(el.type||'').toLowerCase();"
+        "if(t==='password'||t==='hidden'||t==='file'||t==='checkbox'||t==='radio'||"
+        "t==='submit'||t==='button'||t==='reset'||t==='image')continue;"
+        "var v=el.value;if(!v||v.length>200)continue;"
+        "fs.push({name:el.name,value:v});"
+        "}"
+        "if(fs.length&&window.webkit&&window.webkit.messageHandlers&&"
+        "window.webkit.messageHandlers.mustelaForm){"
+        "window.webkit.messageHandlers.mustelaForm.postMessage("
+        "{host:location.hostname,fields:fs});"
+        "}"
+        "}catch(e){}"
+        "},true);"
+        "})();";
 }
 
 }

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mustela
-    VERSION 0.17.0
+    VERSION 0.18.0
     DESCRIPTION "Privacy-first, cross-platform browser engine built on WebKit"
     LANGUAGES CXX)
 
@@ -12,6 +12,7 @@ option(MUSTELA_BUILD_SHELL "Build the mustela shell harness" ON)
 option(MUSTELA_BUILD_TESTS "Build the core test suite" ON)
 option(MUSTELA_BUILD_BENCH "Build the page-load benchmark harness" ON)
 set(MUSTELA_WEBKIT_SDK "" CACHE PATH "Windows: directory with include/ (WebKit C API headers) and lib/ (WebKit import libraries)")
+set(MUSTELA_WEBEXT_DIR "" CACHE PATH "Web extension directory baked into the GTK shell (defaults to the build directory)")
 
 add_library(mustela_warnings INTERFACE)
 if(MSVC)
@@ -45,7 +46,6 @@ target_link_libraries(mustela_core PUBLIC mustela_warnings)
 
 install(TARGETS mustela_core ARCHIVE DESTINATION lib)
 install(DIRECTORY include/mustela DESTINATION include)
-
 if(WIN32)
     target_link_libraries(mustela_core PUBLIC ws2_32)
 endif()
@@ -112,9 +112,30 @@ if(MUSTELA_BUILD_SHELL)
         target_compile_options(mustela-webext PRIVATE ${WEBEXT_CFLAGS_OTHER})
         set_target_properties(mustela-webext PROPERTIES
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+        if(NOT MUSTELA_WEBEXT_DIR)
+            set(MUSTELA_WEBEXT_DIR "${CMAKE_BINARY_DIR}")
+        endif()
         target_compile_definitions(mustela PRIVATE
-            MUSTELA_WEBEXT_DIR="${CMAKE_BINARY_DIR}")
+            MUSTELA_WEBEXT_DIR="${MUSTELA_WEBEXT_DIR}")
+        install(TARGETS mustela RUNTIME DESTINATION bin)
+        if(MUSTELA_BUILD_BENCH)
+            install(TARGETS mustela-bench RUNTIME DESTINATION bin)
+        endif()
+        install(TARGETS mustela-webext LIBRARY DESTINATION lib/mustela/webext)
     endif()
 
     target_link_libraries(mustela PRIVATE mustela_warnings)
 endif()
+
+set(CPACK_PACKAGE_NAME "mustela")
+set(CPACK_PACKAGE_VENDOR "mustela")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Privacy-first, cross-platform browser engine built on WebKit")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "mustela")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+set(CPACK_DEBIAN_PACKAGE_NAME "mustela")
+set(CPACK_DEBIAN_PACKAGE_SECTION "web")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "mel0k1 <218306052+mel0k1@users.noreply.github.com>")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+include(CPack)

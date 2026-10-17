@@ -26,6 +26,7 @@ public:
 
     std::vector<AutofillEntry> find(const std::string& domain, const std::string& field,
         size_t limit = 5) const;
+    std::vector<AutofillEntry> by_domain(const std::string& domain, size_t limit = 16) const;
     void upsert(const std::string& domain, const std::string& field, const std::string& value,
         std::int64_t now);
     bool remove(const std::string& domain, const std::string& field, const std::string& value);
@@ -36,5 +37,8 @@ private:
     std::string path_;
     std::vector<AutofillEntry> entries_;
 };
+
+std::string autofill_fill_script(const std::vector<AutofillEntry>& entries);
+const char* autofill_capture_script();
 
 }

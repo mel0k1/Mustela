@@ -57,6 +57,9 @@ struct SiteDecision {
     bool javascript = true;
     bool cookies_denied = false;
     FingerprintPolicy fingerprint;
+    double zoom = 0.0;
+    std::string user_agent;
+    std::string css;
 };
 
 SiteDecision resolve_site(const PrivacyPolicy& policy, const SiteRules& rules, const std::string& uri);

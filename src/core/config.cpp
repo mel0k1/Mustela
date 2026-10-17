@@ -262,6 +262,8 @@ Settings load_settings(const std::string& path, SettingsReport& report) {
     apply(pairs, "shell.devtools", settings.devtools, &report);
     apply(pairs, "shell.spellcheck", settings.spellcheck, &report);
     apply(pairs, "shell.spellcheck_languages", settings.spellcheck_languages, &report);
+    apply(pairs, "shell.autofill", settings.autofill, &report);
+    apply(pairs, "shell.autofill_save", settings.autofill_save, &report);
     apply(pairs, "privacy.gpc", settings.gpc, &report);
     apply(pairs, "privacy.blocklist", settings.blocklist, &report);
     apply(pairs, "privacy.blocklist_file", settings.blocklist_file, &report);
@@ -328,6 +330,8 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "devtools = " << (settings.devtools ? "true" : "false") << "\n";
     out << "spellcheck = " << (settings.spellcheck ? "true" : "false") << "\n";
     out << "spellcheck_languages = \"" << settings.spellcheck_languages << "\"\n";
+    out << "autofill = " << (settings.autofill ? "true" : "false") << "\n";
+    out << "autofill_save = " << (settings.autofill_save ? "true" : "false") << "\n";
     out << "profile = \"" << settings.shell_profile << "\"\n";
     out << "\n[search]\n";
     out << "default = \"" << settings.search_default << "\"\n";

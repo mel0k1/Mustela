@@ -118,6 +118,8 @@ void test_settings_roundtrip() {
     original.devtools = false;
     original.spellcheck = false;
     original.spellcheck_languages = "en_US,ru_RU";
+    original.autofill = true;
+    original.autofill_save = true;
     original.gpc = false;
     original.blocklist = false;
     original.blocklist_file = "/tmp/trackers.list";
@@ -159,6 +161,8 @@ void test_settings_roundtrip() {
     CHECK(!loaded.devtools);
     CHECK(!loaded.spellcheck);
     CHECK_STR(loaded.spellcheck_languages, "en_US,ru_RU");
+    CHECK(loaded.autofill);
+    CHECK(loaded.autofill_save);
     CHECK(!loaded.gpc);
     CHECK(!loaded.blocklist);
     CHECK_STR(loaded.blocklist_file, "/tmp/trackers.list");
@@ -494,6 +498,19 @@ void test_resolve_site() {
     mustela::SiteDecision allowed = mustela::resolve_site(policy, rules, "https://exempt.example/");
     CHECK(allowed.javascript);
     CHECK(!allowed.fingerprint.active());
+
+    mustela::SitePolicy dressed;
+    dressed.zoom = 1.5;
+    dressed.user_agent = "MustelaUA/1.0";
+    dressed.css = "body{display:none}";
+    rules.set("dress.example", dressed);
+    mustela::SiteDecision styled = mustela::resolve_site(policy, rules, "https://dress.example/what");
+    CHECK(styled.zoom == 1.5);
+    CHECK_STR(styled.user_agent, "MustelaUA/1.0");
+    CHECK_STR(styled.css, "body{display:none}");
+    CHECK(plain.zoom == 0.0);
+    CHECK_STR(plain.user_agent, "");
+    CHECK_STR(plain.css, "");
 }
 
 void test_history_store() {
@@ -1838,6 +1855,36 @@ void test_autofill_store() {
     CHECK(!profile.has(mustela::ProfileStore::Autofill));
 }
 
+void test_autofill_scripts() {
+    mustela::AutofillStore store(temp_path("autofill_scripts"));
+    store.upsert("shop.example", "email", "a@shop.example", 10);
+    store.upsert("shop.example", "name", "Alice \"A\"\\smith\nline", 11);
+    store.upsert("other.example", "phone", "123", 12);
+
+    std::vector<mustela::AutofillEntry> entries = store.by_domain("shop.example");
+    CHECK(entries.size() == 2);
+    CHECK_STR(entries[0].field, "name");
+    CHECK_STR(entries[1].field, "email");
+    CHECK(store.by_domain("www.shop.example").size() == 2);
+    CHECK(store.by_domain("shop2.example").empty());
+    CHECK(store.by_domain("shop.example", 1).size() == 1);
+
+    std::string script = mustela::autofill_fill_script(entries);
+    CHECK(script.find("a@shop.example") != std::string::npos);
+    CHECK(script.find("Alice \\\"A\\\"\\\\smith\\nline") != std::string::npos);
+    CHECK(script.find("querySelectorAll('input,textarea')") != std::string::npos);
+    CHECK(script.find("'password'") != std::string::npos);
+
+    std::string escaped = mustela::autofill_fill_script(
+        {{mustela::AutofillEntry{"d", "f", std::string("ctrl") + char(0x01) + "end", 1, 0}}});
+    CHECK(escaped.find("\\u0001") != std::string::npos);
+
+    std::string capture = mustela::autofill_capture_script();
+    CHECK(std::string(capture).find("mustelaForm") != std::string::npos);
+    CHECK(std::string(capture).find("'password'") != std::string::npos);
+    CHECK(std::string(capture).find("postMessage") != std::string::npos);
+}
+
 void test_public_surface() {
     CHECK(mustela::core_api_version() >= 1);
     CHECK(MUSTELA_CORE_API_VERSION >= 1);
@@ -1881,6 +1928,7 @@ int main() {
     test_search_engines();
     test_profile_registry();
     test_autofill_store();
+    test_autofill_scripts();
     test_public_surface();
 
     if (failures > 0) {

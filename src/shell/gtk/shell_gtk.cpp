@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <map>
@@ -21,6 +22,7 @@
 #include "browsing_data.hpp"
 #include "blocklist.hpp"
 #include "bookmarks.hpp"
+#include "autofill.hpp"
 #include "config.hpp"
 #include "error_page.hpp"
 #include "fingerprint_scripts.hpp"
@@ -83,10 +85,14 @@ struct Browser {
     WebKitWebContext* private_context = nullptr;
     std::unique_ptr<mustela::HistoryStore> history;
     std::unique_ptr<mustela::BookmarkStore> bookmarks;
+    std::unique_ptr<mustela::AutofillStore> autofill;
     std::unique_ptr<mustela::SiteRules> sites;
     GtkWidget* rules_window = nullptr;
     GtkWidget* rules_tree = nullptr;
     GtkListStore* rules_store = nullptr;
+    GtkWidget* rule_zoom_entry = nullptr;
+    GtkWidget* rule_ua_entry = nullptr;
+    GtkWidget* rule_css_entry = nullptr;
     GFileMonitor* settings_monitor = nullptr;
     GFileMonitor* sites_monitor = nullptr;
     guint settings_reload_pending = 0;
@@ -125,6 +131,9 @@ void apply_policies_to_tabs(Browser& b);
 void apply_spell_checking(Browser& b);
 void save_page_as(Browser& b);
 void apply_fingerprint(Browser& b, WebKitWebView* view, const FingerprintPolicy& fp);
+void add_user_script(WebKitUserContentManager* manager, const std::string& source);
+void on_autofill_fill_done(GObject* object, GAsyncResult* result, gpointer);
+void on_form_message(WebKitUserContentManager* manager, WebKitJavascriptResult* result, gpointer user_data);
 void refresh_status(Browser& b);
 void flash_status(const char* text);
 void mark_startup(Browser& b);
@@ -501,6 +510,80 @@ void on_data_cleared(GObject* object, GAsyncResult* result, gpointer) {
     flash_status("browsing data cleared");
 }
 
+std::string js_value_string(JSCValue* object, const char* name) {
+    if (!object || !jsc_value_is_object(object)) return "";
+    JSCValue* prop = jsc_value_object_get_property(object, name);
+    std::string out;
+    if (prop && jsc_value_is_string(prop)) {
+        char* text = jsc_value_to_string(prop);
+        if (text) out = text;
+        g_free(text);
+    }
+    if (prop) g_object_unref(prop);
+    return out;
+}
+
+void on_autofill_fill_done(GObject* object, GAsyncResult* result, gpointer) {
+    GError* error = nullptr;
+    JSCValue* value = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(object), result, &error);
+    if (error) {
+        g_error_free(error);
+        return;
+    }
+    if (!value) return;
+    int filled = jsc_value_to_int32(value);
+    g_object_unref(value);
+    if (filled > 0) {
+        flash_status(("autofill: filled " + std::to_string(filled) + " fields").c_str());
+    }
+}
+
+void on_form_message(WebKitUserContentManager*, WebKitJavascriptResult* result, gpointer user_data) {
+    Browser& b = *browser;
+    Tab* tab = static_cast<Tab*>(user_data);
+    if (!tab || tab->is_private() || !b.autofill || !b.settings.autofill_save) return;
+    JSCValue* value = webkit_javascript_result_get_js_value(result);
+    if (!value || !jsc_value_is_object(value)) return;
+    std::string host = js_value_string(value, "host");
+    if (host.empty() || host.size() > 255 || host.find('/') != std::string::npos
+        || host.find(' ') != std::string::npos) {
+        return;
+    }
+    JSCValue* fields = jsc_value_object_get_property(value, "fields");
+    if (!fields) return;
+    if (!jsc_value_is_object(fields)) {
+        g_object_unref(fields);
+        return;
+    }
+    JSCValue* length_value = jsc_value_object_get_property(fields, "length");
+    int count = length_value ? jsc_value_to_int32(length_value) : 0;
+    if (length_value) g_object_unref(length_value);
+    if (count <= 0 || count > 32) {
+        g_object_unref(fields);
+        return;
+    }
+    std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+    int saved = 0;
+    for (int i = 0; i < count; ++i) {
+        JSCValue* item = jsc_value_object_get_property_at_index(fields, static_cast<guint>(i));
+        if (item && jsc_value_is_object(item)) {
+            std::string name = js_value_string(item, "name");
+            std::string field_value = js_value_string(item, "value");
+            if (!name.empty() && name.size() <= 100 && field_value.size() <= 200
+                && field_value.find_first_not_of(" \t") != std::string::npos) {
+                b.autofill->upsert(host, name, field_value, now);
+                ++saved;
+            }
+        }
+        if (item) g_object_unref(item);
+    }
+    g_object_unref(fields);
+    if (saved) {
+        b.autofill->save();
+        flash_status(("autofill: saved " + std::to_string(saved) + " values").c_str());
+    }
+}
+
 void clear_browsing_data(Browser& b) {
     mustela::ClearRequest request;
     WebKitWebsiteDataTypes types = static_cast<WebKitWebsiteDataTypes>(webkit_data_types(request.kinds));
@@ -514,18 +597,37 @@ void clear_browsing_data(Browser& b) {
     }
 }
 
-void apply_view_policy(Browser& b, WebKitWebView* view, const std::string& uri) {
+void apply_view_policy(Browser& b, WebKitWebView* view, const std::string& uri, const Tab* tab) {
     if (!b.sites) return;
     mustela::SiteDecision decision = mustela::resolve_site(b.privacy, *b.sites, uri);
     WebKitSettings* settings = webkit_web_view_get_settings(view);
     g_object_set(settings, "enable-javascript", decision.javascript ? TRUE : FALSE, nullptr);
     apply_fingerprint(b, view, decision.fingerprint);
+    WebKitUserContentManager* manager = webkit_web_view_get_user_content_manager(view);
+    if (tab && !tab->is_private() && b.settings.autofill_save) {
+        add_user_script(manager, mustela::autofill_capture_script());
+    }
+    webkit_user_content_manager_remove_all_style_sheets(manager);
+    if (!decision.css.empty()) {
+        WebKitUserStyleSheet* sheet = webkit_user_style_sheet_new(decision.css.c_str(),
+            WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_STYLE_LEVEL_USER, nullptr, nullptr);
+        webkit_user_content_manager_add_style_sheet(manager, sheet);
+        webkit_user_style_sheet_unref(sheet);
+    }
+    if (!decision.user_agent.empty()) {
+        webkit_settings_set_user_agent(settings, decision.user_agent.c_str());
+    } else if (tab && !tab->default_ua.empty()) {
+        webkit_settings_set_user_agent(settings, tab->default_ua.c_str());
+    }
+    if (decision.zoom > 0.0) {
+        webkit_web_view_set_zoom_level(view, decision.zoom);
+    }
 }
 
 void apply_policies_to_tabs(Browser& b) {
     for (std::unique_ptr<Tab>& tab : b.tabs) {
         harden_view(b, tab->view());
-        apply_view_policy(b, tab->view(), tab->uri());
+        apply_view_policy(b, tab->view(), tab->uri(), tab.get());
     }
 }
 
@@ -1024,7 +1126,7 @@ void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_d
         }
     }
     if (event == WEBKIT_LOAD_COMMITTED) {
-        apply_view_policy(*browser, tab->view(), tab->uri());
+        apply_view_policy(*browser, tab->view(), tab->uri(), tab);
     }
     if (event == WEBKIT_LOAD_FINISHED) {
         gtk_entry_set_progress_fraction(GTK_ENTRY(browser->url_entry), 0.0);
@@ -1043,6 +1145,19 @@ void on_view_load_changed(WebKitWebView*, WebKitLoadEvent event, gpointer user_d
             if (tab && !tab->is_private() && browser->sites) {
                 mustela::SiteDecision decision = mustela::resolve_site(browser->privacy, *browser->sites, tab->uri());
                 if (decision.cookies_denied) deny_origin_cookies(*browser, tab->uri());
+            }
+            if (tab && !tab->is_private() && !tab->error_page && browser->autofill
+                && browser->settings.autofill) {
+                std::string host = mustela::host_from_uri(tab->uri());
+                if (!host.empty()) {
+                    std::vector<mustela::AutofillEntry> entries = browser->autofill->by_domain(host, 16);
+                    if (!entries.empty()) {
+                        std::string script = mustela::autofill_fill_script(entries);
+                        webkit_web_view_evaluate_javascript(tab->view(), script.c_str(),
+                            static_cast<gssize>(script.size()), nullptr, nullptr, nullptr,
+                            on_autofill_fill_done, nullptr);
+                    }
+                }
             }
         }
         save_session_now(*browser);
@@ -1240,9 +1355,12 @@ GtkWidget* on_view_create(WebKitWebView* view, WebKitNavigationAction* action, g
     webkit_web_view_set_zoom_level(related, b.settings.zoom_default);
     WebKitURIRequest* request = webkit_navigation_action_get_request(action);
     const gchar* target = request ? webkit_uri_request_get_uri(request) : nullptr;
-    apply_view_policy(b, related, target ? target : "");
-
+    gchar* default_ua = nullptr;
+    g_object_get(webkit_web_view_get_settings(related), "user-agent", &default_ua, nullptr);
     Tab* tab = new Tab(related, priv);
+    tab->default_ua = default_ua ? default_ua : "";
+    g_free(default_ua);
+    apply_view_policy(b, related, target ? target : "", tab);
     tab->set_label(build_tab_label(b, tab));
     b.tabs.emplace_back(tab);
     gtk_notebook_append_page(GTK_NOTEBOOK(b.notebook), GTK_WIDGET(related), tab->label());
@@ -1644,6 +1762,9 @@ void on_favicon_available(WebKitWebView* view, GParamSpec*, gpointer user_data) 
 }
 
 void connect_tab_signals(Tab* tab) {
+    WebKitUserContentManager* ucm = webkit_web_view_get_user_content_manager(tab->view());
+    g_signal_connect(ucm, "script-message-received::mustelaForm", G_CALLBACK(on_form_message), tab);
+    webkit_user_content_manager_register_script_message_handler(ucm, "mustelaForm");
     g_signal_connect(tab->view(), "notify::uri", G_CALLBACK(on_view_uri_changed), tab);
     g_signal_connect(tab->view(), "notify::title", G_CALLBACK(on_view_title_changed), tab);
     g_signal_connect(tab->view(), "notify::estimated-load-progress", G_CALLBACK(on_view_progress_changed), tab);
@@ -1712,8 +1833,12 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     WebKitWebView* view = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(context));
     harden_view(b, view);
     webkit_web_view_set_zoom_level(view, b.settings.zoom_default);
-    apply_view_policy(b, view, url ? url : "");
     Tab* tab = new Tab(view, priv);
+    gchar* default_ua = nullptr;
+    g_object_get(webkit_web_view_get_settings(view), "user-agent", &default_ua, nullptr);
+    tab->default_ua = default_ua ? default_ua : "";
+    g_free(default_ua);
+    apply_view_policy(b, view, url ? url : "", tab);
     tab->set_label(build_tab_label(b, tab));
     b.tabs.emplace_back(tab);
 
@@ -1826,7 +1951,8 @@ enum RuleCols {
     COL_JS,
     COL_COOKIES,
     COL_FP,
-    COL_PERM
+    COL_PERM,
+    COL_ZOOM
 };
 
 enum RuleAction {
@@ -1841,8 +1967,16 @@ enum RuleAction {
     RULE_PERM_ALLOW,
     RULE_PERM_DENY,
     RULE_PERM_DEFAULT,
-    RULE_REMOVE
+    RULE_REMOVE,
+    RULE_DRESS
 };
+
+std::string rule_zoom_text(double zoom) {
+    if (zoom <= 0.0) return "";
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.2g", zoom);
+    return buffer;
+}
 
 void reload_rules_model(GtkListStore* store) {
     gtk_list_store_clear(store);
@@ -1855,7 +1989,8 @@ void reload_rules_model(GtkListStore* store) {
             COL_JS, mustela::site_rule_name(entry.policy.javascript),
             COL_COOKIES, mustela::site_rule_name(entry.policy.cookies),
             COL_FP, mustela::site_rule_name(entry.policy.fingerprint),
-            COL_PERM, mustela::site_rule_name(entry.policy.permissions), -1);
+            COL_PERM, mustela::site_rule_name(entry.policy.permissions),
+            COL_ZOOM, rule_zoom_text(entry.policy.zoom).c_str(), -1);
     }
 }
 
@@ -1899,6 +2034,22 @@ void on_rule_action(GtkButton*, gpointer user_data) {
             case RULE_PERM_ALLOW: policy.permissions = mustela::SiteRule::Allow; break;
             case RULE_PERM_DENY: policy.permissions = mustela::SiteRule::Deny; break;
             case RULE_PERM_DEFAULT: policy.permissions = mustela::SiteRule::Default; break;
+            case RULE_DRESS: {
+                const gchar* zoom_text = b.rule_zoom_entry
+                    ? gtk_entry_get_text(GTK_ENTRY(b.rule_zoom_entry)) : "";
+                double zoom = zoom_text && *zoom_text ? std::atof(zoom_text) : 0.0;
+                if (!(zoom > 0.0)) zoom = 0.0;
+                if (zoom > 0.0) {
+                    if (zoom < 0.3) zoom = 0.3;
+                    if (zoom > 3.0) zoom = 3.0;
+                }
+                policy.zoom = zoom;
+                policy.user_agent = b.rule_ua_entry
+                    ? gtk_entry_get_text(GTK_ENTRY(b.rule_ua_entry)) : "";
+                policy.css = b.rule_css_entry
+                    ? gtk_entry_get_text(GTK_ENTRY(b.rule_css_entry)) : "";
+                break;
+            }
             default: break;
         }
         b.sites->set(host, policy);
@@ -1908,11 +2059,24 @@ void on_rule_action(GtkButton*, gpointer user_data) {
     apply_policies_to_tabs(b);
 }
 
+void on_rules_selection_changed(GtkTreeSelection*, gpointer) {
+    if (!browser || !browser->sites || !browser->rule_zoom_entry) return;
+    std::string host = current_or_selected_host();
+    const mustela::SitePolicy* policy = host.empty() ? nullptr : browser->sites->find(host);
+    if (!policy) return;
+    gtk_entry_set_text(GTK_ENTRY(browser->rule_zoom_entry), rule_zoom_text(policy->zoom).c_str());
+    gtk_entry_set_text(GTK_ENTRY(browser->rule_ua_entry), policy->user_agent.c_str());
+    gtk_entry_set_text(GTK_ENTRY(browser->rule_css_entry), policy->css.c_str());
+}
+
 void on_rules_window_destroy(GtkWidget*, gpointer) {
     if (browser) {
         browser->rules_window = nullptr;
         browser->rules_tree = nullptr;
         browser->rules_store = nullptr;
+        browser->rule_zoom_entry = nullptr;
+        browser->rule_ua_entry = nullptr;
+        browser->rule_css_entry = nullptr;
     }
 }
 
@@ -1929,7 +2093,7 @@ void open_site_rules_window(Browser& b) {
     gtk_window_set_transient_for(GTK_WINDOW(window), GTK_WINDOW(b.window));
     g_signal_connect(window, "destroy", G_CALLBACK(on_rules_window_destroy), nullptr);
 
-    GtkListStore* store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkListStore* store = gtk_list_store_new(6, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     b.rules_store = store;
     reload_rules_model(store);
 
@@ -1945,7 +2109,10 @@ void open_site_rules_window(Browser& b) {
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Cookies", renderer, "text", COL_COOKIES, nullptr);
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Fingerprint", renderer, "text", COL_FP, nullptr);
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Permissions", renderer, "text", COL_PERM, nullptr);
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(tree), -1, "Zoom", renderer, "text", COL_ZOOM, nullptr);
     gtk_tree_view_column_set_expand(gtk_tree_view_get_column(GTK_TREE_VIEW(tree), COL_HOST), TRUE);
+    g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(tree)), "changed",
+        G_CALLBACK(on_rules_selection_changed), nullptr);
 
     GtkWidget* scroll = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -1987,6 +2154,26 @@ void open_site_rules_window(Browser& b) {
     gtk_box_pack_end(GTK_BOX(rows[1]), hint, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(controls), rows[0], FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(controls), rows[1], FALSE, FALSE, 0);
+
+    GtkWidget* dress_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    b.rule_zoom_entry = gtk_entry_new();
+    gtk_entry_set_width_chars(GTK_ENTRY(b.rule_zoom_entry), 6);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(b.rule_zoom_entry), "zoom");
+    b.rule_ua_entry = gtk_entry_new();
+    gtk_entry_set_width_chars(GTK_ENTRY(b.rule_ua_entry), 28);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(b.rule_ua_entry), "user agent override");
+    b.rule_css_entry = gtk_entry_new();
+    gtk_entry_set_width_chars(GTK_ENTRY(b.rule_css_entry), 24);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(b.rule_css_entry), "css");
+    GtkWidget* dress_btn = gtk_button_new_with_label("Apply dressing");
+    g_signal_connect(dress_btn, "clicked", G_CALLBACK(on_rule_action),
+        reinterpret_cast<gpointer>(static_cast<std::intptr_t>(RULE_DRESS)));
+    gtk_box_pack_start(GTK_BOX(dress_row), gtk_label_new("dressing:"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(dress_row), b.rule_zoom_entry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(dress_row), b.rule_ua_entry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(dress_row), b.rule_css_entry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(dress_row), dress_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(controls), dress_row, FALSE, FALSE, 0);
 
     GtkWidget* layout = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_container_set_border_width(GTK_CONTAINER(layout), 4);
@@ -2291,6 +2478,8 @@ int mustela_main(int argc, char** argv) {
         browser->history = std::make_unique<mustela::HistoryStore>(browser->profile->paths().history);
     }
     browser->bookmarks = std::make_unique<mustela::BookmarkStore>(browser->profile->paths().bookmarks);
+    browser->autofill = std::make_unique<mustela::AutofillStore>(browser->profile->paths().autofill);
+    browser->autofill->load();
 
     browser->filter_store = webkit_user_content_filter_store_new(browser->profile->paths().filters.c_str());
     static const char fonts_filter_json[] =

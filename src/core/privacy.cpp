@@ -57,6 +57,9 @@ SiteDecision resolve_site(const PrivacyPolicy& policy, const SiteRules& rules, c
     decision.fingerprint = policy.fingerprint;
     if (site.fingerprint == SiteRule::Allow) decision.fingerprint = FingerprintPolicy{};
     if (site.fingerprint == SiteRule::Deny) decision.fingerprint = fingerprint_strict();
+    decision.zoom = site.zoom;
+    decision.user_agent = site.user_agent;
+    decision.css = site.css;
     return decision;
 }
 

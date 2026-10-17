@@ -28,6 +28,7 @@ public:
     LoadTimer load;
     bool error_page = false;
     std::string error_page_uri;
+    std::string default_ua;
 
     std::string uri() const;
     std::string title() const;

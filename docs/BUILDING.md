@@ -31,6 +31,18 @@ Run:
 ./build/mustela https://example.org
 ```
 
+### Packaging
+
+CPack ships a deb and a portable tarball from the same build. The deb installs `mustela`, `mustela-bench`, the web extension under `/usr/lib/mustela/webext`, the static core and the `include/mustela/` headers, with shared-library dependencies generated from the actual binaries:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMUSTELA_WEBEXT_DIR=/usr/lib/mustela/webext
+cmake --build build -j "$(nproc)"
+cmake --build build --target package          # or: cd build && cpack -G "DEB;TGZ"
+```
+
+`MUSTELA_WEBEXT_DIR` is the extension path baked into the shell — set it to the install location for packaged builds; development builds default to the build directory. Tagged versions (`v*`) produce the same artifacts on GitHub Releases through the CI release job. A Windows bundle is deliberately absent until the WinCairo runtime DLLs have a pinned source — a compiled exe without its runtime is not a release.
+
 ## Configuration
 
 Settings live in `~/.config/mustela/settings.toml`, created on first run and saved on exit. The file carries a `version` key (currently 1); on load the engine reports unknown keys, invalid values and files written by a newer engine — GTK prints them to stdout, Windows to the debug output — while the remaining keys still apply on top of defaults.
@@ -47,6 +59,8 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | shell.devtools | true | enable the Web Inspector (Ctrl+Shift+I / F12) |
 | shell.spellcheck | true | enable the spell checker for editable content (GTK); needs system enchant dictionaries, e.g. `hunspell-en-us` |
 | shell.spellcheck_languages | (empty) | comma-separated dictionary tags, e.g. `en_US, ru_RU`; empty uses the locale default (GTK) |
+| shell.autofill | false | fill visible form fields from the profile's `autofill.tsv` after a page loads (GTK, normal tabs only) |
+| shell.autofill_save | false | capture non-password fields on form submit into `autofill.tsv` (GTK, normal tabs only; caps: 32 fields × 200 chars) |
 | downloads.dir | (empty) | download destination; empty means the platform Downloads folder |
 | downloads.mode | auto | `auto` saves without asking, `ask` opens a save dialog per download |
 | permissions.geolocation | deny | `deny`, `ask` or `allow` for location requests |
@@ -141,7 +155,7 @@ css = "body { font-size: 18px }"
 
 A rule for a domain covers its subdomains (`example.org` matches `www.example.org`). Sections for registry suffixes (`[com]`, `[co.uk]`, any public suffix from the bundled list) are ignored on load and cannot be written back, so a single entry can never cover a whole registry; IP addresses and `localhost` are valid hosts. The same rules are editable at runtime in the site-rules window (`Ctrl+Shift+S`): buttons act on the selected row, or on the current site when nothing is selected. `fingerprint = "allow"` exempts the site from all fingerprint switches (use for maps, games, canvas apps); `fingerprint = "deny"` forces the strict set on it. `permissions = "allow"` remembers a granted permission for the host (skip the prompt for future requests); `permissions = "deny"` blocks them without asking. Both are also written by the "Always allow" / "Never allow" choices in the permission prompt; private tabs never write rules.
 
-Three dressing keys round out a rule for the Kiwi embedder: `zoom` (0.3–3.0, other values are clamped; 0 or absent means the global default), `user_agent` (a single-line quoted string overriding the agent for that host) and `css` (a single-line quoted stylesheet injected for that host). The closest matching rule wins as a whole — a host's section replaces its parent's entirely, there is no per-key merge. These keys are core API today; the shell harness does not apply them yet.
+Three dressing keys round out a rule: `zoom` (0.3–3.0, other values are clamped; 0 or absent means the global default), `user_agent` (a single-line quoted string overriding the agent for that host) and `css` (a single-line quoted stylesheet injected for that host). The closest matching rule wins as a whole — a host's section replaces its parent's entirely, there is no per-key merge. The GTK harness applies all three when a page commits (zoom overrides the tab level only when a rule sets it, the user agent falls back to the engine default, CSS lands as a user style sheet), and the site-rules window (Ctrl+Shift+S) edits them through the dressing row.
 
 ## Shortcuts
 

@@ -62,6 +62,8 @@ struct Settings {
     bool devtools = true;
     bool spellcheck = true;
     std::string spellcheck_languages;
+    bool autofill = false;
+    bool autofill_save = false;
     bool gpc = true;
     bool blocklist = true;
     std::string blocklist_file;

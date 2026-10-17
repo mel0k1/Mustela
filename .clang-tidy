@@ -1,0 +1,3 @@
+Checks: 'clang-analyzer-*,performance-*,bugprone-use-after-move,modernize-use-nullptr,readability-container-size-empty'
+WarningsAsErrors: ''
+HeaderFilterRegex: 'src/core/.*\.hpp$'

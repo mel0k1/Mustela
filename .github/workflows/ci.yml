@@ -3,8 +3,12 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   linux:
@@ -62,3 +66,82 @@ jobs:
 
       - name: Compile bench against upstream headers
         run: cl /nologo /c /W4 /std:c++20 /EHsc /Ibuild\sdk\include /Isrc /Isrc\core /Fobuild\bench_win.obj src\bench\bench_win.cpp
+
+  sanitizers:
+    name: linux core tests under asan + ubsan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Configure
+        run: cmake -S . -B build-san -G Ninja -DCMAKE_BUILD_TYPE=Debug -DMUSTELA_BUILD_SHELL=OFF -DMUSTELA_BUILD_BENCH=OFF -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+
+      - name: Build
+        run: cmake --build build-san
+
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1:abort_on_error=1
+        run: ctest --test-dir build-san --output-on-failure
+
+  clang-tidy:
+    name: static analysis advisory
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang-tidy
+
+      - name: Configure
+        run: cmake -S . -B build-tidy -G Ninja -DCMAKE_BUILD_TYPE=Debug -DMUSTELA_BUILD_SHELL=OFF -DMUSTELA_BUILD_BENCH=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run clang-tidy on core
+        run: clang-tidy -p build-tidy --config-file=.clang-tidy $(ls src/core/*.cpp)
+
+  release:
+    name: release packaging
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows-core, windows-shell, sanitizers]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config libwebkit2gtk-4.1-dev xvfb
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMUSTELA_WEBEXT_DIR=/usr/lib/mustela/webext
+
+      - name: Build and test
+        run: |
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+
+      - name: Package deb and tarball
+        run: |
+          cd build
+          cpack -G "DEB;TGZ"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Mustela $GITHUB_REF_NAME" \
+            --generate-notes \
+            build/mustela-*.deb \
+            build/mustela-*.tar.gz
