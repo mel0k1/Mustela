@@ -1,6 +1,7 @@
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
 #include <libsoup/soup.h>
+#include <gio/gio.h>
 #include <glib/gstdio.h>
 #include <cairo/cairo.h>
 
@@ -100,6 +101,8 @@ struct Browser {
     bool startup_marked = false;
     double startup_entry_ms = 0;
     std::map<WebKitDownload*, DownloadState> downloads;
+    GApplication* gapp = nullptr;
+    unsigned notification_seq = 0;
     std::vector<std::unique_ptr<Tab>> tabs;
 };
 
@@ -761,6 +764,41 @@ void on_destroy(GtkWidget*, gpointer) {
     gtk_main_quit();
 }
 
+void print_page(Browser& b) {
+    Tab* tab = active_tab(b);
+    if (!tab) return;
+    WebKitPrintOperation* operation = webkit_print_operation_new(tab->view());
+    webkit_print_operation_run_dialog(operation, GTK_WINDOW(b.window));
+    g_object_unref(operation);
+}
+
+void on_snapshot_ready(WebKitWebView* view, GAsyncResult* result, gpointer) {
+    GError* error = nullptr;
+    cairo_surface_t* surface = webkit_web_view_get_snapshot_finish(view, result, &error);
+    if (!surface) {
+        if (error) g_error_free(error);
+        flash_status("screenshot failed");
+        return;
+    }
+    char stamp[32];
+    std::time_t now = std::time(nullptr);
+    std::tm local = {};
+    localtime_r(&now, &local);
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local);
+    std::string name = std::string("mustela-screenshot-") + stamp + ".png";
+    std::string path = download_directory(*browser) + "/" + name;
+    cairo_status_t status = cairo_surface_write_to_png(surface, path.c_str());
+    cairo_surface_destroy(surface);
+    flash_status(status == CAIRO_STATUS_SUCCESS ? ("screenshot saved: " + name).c_str() : "screenshot failed");
+}
+
+void take_screenshot(Browser& b) {
+    Tab* tab = active_tab(b);
+    if (!tab) return;
+    webkit_web_view_get_snapshot(tab->view(), WEBKIT_SNAPSHOT_REGION_VISIBLE, WEBKIT_SNAPSHOT_OPTIONS_NONE,
+        nullptr, reinterpret_cast<GAsyncReadyCallback>(on_snapshot_ready), nullptr);
+}
+
 gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
     Browser& b = *browser;
     GdkModifierType mods = static_cast<GdkModifierType>(event->state & gtk_accelerator_get_default_mod_mask());
@@ -796,6 +834,14 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
     }
     if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_d) {
         toggle_bookmark(b);
+        return TRUE;
+    }
+    if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_p) {
+        print_page(b);
+        return TRUE;
+    }
+    if (mods == (GDK_CONTROL_MASK | GDK_MOD1_MASK) && event->keyval == GDK_KEY_s) {
+        take_screenshot(b);
         return TRUE;
     }
     if (mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && event->keyval == GDK_KEY_O) {
@@ -1092,6 +1138,24 @@ void on_view_ready_to_show(WebKitWebView* view, gpointer) {
 
 void on_view_close(WebKitWebView*, gpointer user_data) {
     close_tab(*browser, static_cast<Tab*>(user_data));
+}
+
+gboolean on_show_notification(WebKitWebView*, WebKitNotification* notification, gpointer) {
+    Browser& b = *browser;
+    if (!b.gapp || !notification) return TRUE;
+    const gchar* title = webkit_notification_get_title(notification);
+    const gchar* body = webkit_notification_get_body(notification);
+    std::string shown = title ? mustela::sanitize_dialog_text(title, 256) : std::string();
+    if (shown.empty()) shown = "Notification";
+    GNotification* item = g_notification_new(shown.c_str());
+    if (body && *body) {
+        std::string text = mustela::sanitize_dialog_text(body, 512);
+        if (!text.empty()) g_notification_set_body(item, text.c_str());
+    }
+    std::string key = "notification-" + std::to_string(++b.notification_seq);
+    g_application_send_notification(b.gapp, key.c_str(), item);
+    g_object_unref(item);
+    return TRUE;
 }
 
 enum PermResponse {
@@ -1468,6 +1532,7 @@ void connect_tab_signals(Tab* tab) {
     g_signal_connect(tab->view(), "script-dialog", G_CALLBACK(on_script_dialog), nullptr);
     g_signal_connect(tab->view(), "mouse-target-changed", G_CALLBACK(on_view_mouse_target_changed), tab);
     g_signal_connect(tab->view(), "permission-request", G_CALLBACK(on_permission_request), tab);
+    g_signal_connect(tab->view(), "show-notification", G_CALLBACK(on_show_notification), nullptr);
     g_signal_connect(tab->view(), "accept-certificate", G_CALLBACK(on_accept_certificate), tab);
     g_signal_connect(tab->view(), "authenticate", G_CALLBACK(on_authenticate), nullptr);
     g_signal_connect(tab->view(), "web-process-terminated", G_CALLBACK(on_web_process_terminated), tab);
@@ -2047,6 +2112,13 @@ int mustela_main(int argc, char** argv) {
 
     gtk_init(&argc, &argv);
 
+    browser->gapp = g_application_new("com.github.mel0k1.Mustela", G_APPLICATION_NON_UNIQUE);
+    if (g_application_register(browser->gapp, nullptr, nullptr)) {
+        g_application_hold(browser->gapp);
+    } else {
+        g_clear_object(&browser->gapp);
+    }
+
     gchar* config_dir = g_build_filename(g_get_user_config_dir(), "mustela", nullptr);
     g_mkdir_with_parents(config_dir, 0700);
     gchar* config_path = g_build_filename(config_dir, "settings.toml", nullptr);
@@ -2257,6 +2329,10 @@ int mustela_main(int argc, char** argv) {
     g_free(config_dir);
     g_free(config_path);
     g_free(profile_dir);
+    if (browser->gapp) {
+        g_application_release(browser->gapp);
+        g_clear_object(&browser->gapp);
+    }
     browser = nullptr;
     return 0;
 }
