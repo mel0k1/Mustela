@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mustela
-    VERSION 0.22.0
+    VERSION 0.22.1
     DESCRIPTION "Privacy-first, cross-platform browser engine built on WebKit"
     LANGUAGES CXX)
 
@@ -53,6 +53,7 @@ target_link_libraries(mustela_core PUBLIC mustela_warnings)
 install(TARGETS mustela_core EXPORT mustela_targets ARCHIVE DESTINATION lib)
 install(TARGETS mustela_warnings EXPORT mustela_targets)
 install(DIRECTORY include/mustela DESTINATION include)
+install(DIRECTORY src/core/ DESTINATION include/mustela FILES_MATCHING PATTERN "*.hpp")
 if(WIN32)
     target_link_libraries(mustela_core PUBLIC ws2_32)
 endif()

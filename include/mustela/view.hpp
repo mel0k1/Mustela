@@ -6,11 +6,11 @@
 #include <memory>
 #include <string>
 
-#include "mustela/browsing_data.hpp"
-#include "mustela/privacy.hpp"
-#include "mustela/profile.hpp"
-#include "mustela/settings.hpp"
-#include "mustela/site_rules.hpp"
+#include "browsing_data.hpp"
+#include "privacy.hpp"
+#include "profile.hpp"
+#include "settings.hpp"
+#include "site_rules.hpp"
 
 namespace mustela {
 
