@@ -39,6 +39,16 @@ jobs:
           path: build/Testing/
           if-no-files-found: ignore
 
+      - name: Report failed checks
+        if: failure()
+        run: |
+          LOG=build/Testing/Temporary/LastTest.log
+          if [ -f "$LOG" ]; then
+            grep -E "not ok|Failed|timeout" "$LOG" | head -20 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
+
       - name: Page-load bench
         run: xvfb-run -a env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 ./build/mustela-bench --url "file://${{ github.workspace }}/tests/fixtures/bench.html" --runs 5 --max-ms 10000
 
