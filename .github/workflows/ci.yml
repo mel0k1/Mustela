@@ -29,7 +29,7 @@ jobs:
         run: cmake --build build
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: xvfb-run -a env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 ctest --test-dir build --output-on-failure
 
       - name: Page-load bench
         run: xvfb-run -a env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 ./build/mustela-bench --url "file://${{ github.workspace }}/tests/fixtures/bench.html" --runs 5 --max-ms 10000
@@ -79,7 +79,7 @@ jobs:
           sudo apt-get install -y cmake ninja-build
 
       - name: Configure
-        run: cmake -S . -B build-san -G Ninja -DCMAKE_BUILD_TYPE=Debug -DMUSTELA_BUILD_SHELL=OFF -DMUSTELA_BUILD_BENCH=OFF -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+        run: cmake -S . -B build-san -G Ninja -DCMAKE_BUILD_TYPE=Debug -DMUSTELA_BUILD_SHELL=OFF -DMUSTELA_BUILD_BENCH=OFF -DMUSTELA_BUILD_VIEW=OFF -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
 
       - name: Build
         run: cmake --build build-san
@@ -103,7 +103,7 @@ jobs:
           sudo apt-get install -y cmake ninja-build clang-tidy
 
       - name: Configure
-        run: cmake -S . -B build-tidy -G Ninja -DCMAKE_BUILD_TYPE=Debug -DMUSTELA_BUILD_SHELL=OFF -DMUSTELA_BUILD_BENCH=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        run: cmake -S . -B build-tidy -G Ninja -DCMAKE_BUILD_TYPE=Debug -DMUSTELA_BUILD_SHELL=OFF -DMUSTELA_BUILD_BENCH=OFF -DMUSTELA_BUILD_VIEW=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: Run clang-tidy on core
         run: clang-tidy -p build-tidy --config-file=.clang-tidy $(ls src/core/*.cpp)
@@ -129,7 +129,7 @@ jobs:
       - name: Build and test
         run: |
           cmake --build build
-          ctest --test-dir build --output-on-failure
+          xvfb-run -a env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 ctest --test-dir build --output-on-failure
 
       - name: Package deb and tarball
         run: |

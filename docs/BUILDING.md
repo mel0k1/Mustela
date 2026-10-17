@@ -43,6 +43,10 @@ cmake --build build --target package          # or: cd build && cpack -G "DEB;TG
 
 `MUSTELA_WEBEXT_DIR` is the extension path baked into the shell — set it to the install location for packaged builds; development builds default to the build directory. Tagged versions (`v*`) produce the same artifacts on GitHub Releases through the CI release job. A Windows bundle is deliberately absent until the WinCairo runtime DLLs have a pinned source — a compiled exe without its runtime is not a release.
 
+### Embedding the engine
+
+Besides the harness, the build produces `libmustela_view_gtk.a` behind `include/mustela/view.hpp` — the view surface embedders (Kiwi) consume; toggle it with `-DMUSTELA_BUILD_VIEW=OFF`. The header has zero WebKit types: point `ViewConfig` at your `Settings`/`PrivacyPolicy`/`SiteRules`/`Profile` objects, create a `ViewSession` and `View` instances, pack `view.native_widget()` (a `GtkWidget*` on the GTK port) into your window, and handle the callbacks — the engine applies the full privacy pipeline, per-site dressing, error pages, downloads, dialogs, permissions and popups for you. Consumption is `-Iinclude` plus a link against `mustela_view_gtk` and `mustela_core`; `cmake --install` ships both libraries and all `include/mustela/` headers (including `view.hpp`, guarded by `MUSTELA_VIEW_API_VERSION`). `ctest` includes `mustela_view_smoke`, a runtime check of the view surface under xvfb.
+
 ## Configuration
 
 Settings live in `~/.config/mustela/settings.toml`, created on first run and saved on exit. The file carries a `version` key (currently 1); on load the engine reports unknown keys, invalid values and files written by a newer engine — GTK prints them to stdout, Windows to the debug output — while the remaining keys still apply on top of defaults.

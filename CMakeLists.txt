@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mustela
-    VERSION 0.18.0
+    VERSION 0.19.0
     DESCRIPTION "Privacy-first, cross-platform browser engine built on WebKit"
     LANGUAGES CXX)
 
@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(MUSTELA_BUILD_SHELL "Build the mustela shell harness" ON)
 option(MUSTELA_BUILD_TESTS "Build the core test suite" ON)
 option(MUSTELA_BUILD_BENCH "Build the page-load benchmark harness" ON)
+option(MUSTELA_BUILD_VIEW "Build the GTK view library for embedders" ON)
 set(MUSTELA_WEBKIT_SDK "" CACHE PATH "Windows: directory with include/ (WebKit C API headers) and lib/ (WebKit import libraries)")
 set(MUSTELA_WEBEXT_DIR "" CACHE PATH "Web extension directory baked into the GTK shell (defaults to the build directory)")
 
@@ -58,6 +59,37 @@ if(MUSTELA_BUILD_TESTS)
     add_test(NAME mustela_core_tests COMMAND mustela_core_tests)
     set_tests_properties(mustela_core_tests PROPERTIES
         ENVIRONMENT "MUSTELA_TEST_TMP=${CMAKE_CURRENT_BINARY_DIR}/test-tmp")
+endif()
+
+if(MUSTELA_BUILD_VIEW)
+    if(WIN32)
+        message(STATUS "mustela_view_gtk is not available on Windows yet")
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(WEBKIT REQUIRED webkit2gtk-4.1)
+        add_library(mustela_view_gtk STATIC src/view/gtk/view_gtk.cpp)
+        target_link_libraries(mustela_view_gtk PUBLIC mustela_core)
+        target_include_directories(mustela_view_gtk PRIVATE ${WEBKIT_INCLUDE_DIRS})
+        target_link_directories(mustela_view_gtk PRIVATE ${WEBKIT_LIBRARY_DIRS})
+        target_link_libraries(mustela_view_gtk PRIVATE ${WEBKIT_LIBRARIES})
+        target_compile_options(mustela_view_gtk PRIVATE ${WEBKIT_CFLAGS_OTHER})
+        if(NOT MUSTELA_WEBEXT_DIR)
+            set(MUSTELA_WEBEXT_DIR "${CMAKE_BINARY_DIR}")
+        endif()
+        target_compile_definitions(mustela_view_gtk PRIVATE
+            MUSTELA_WEBEXT_DIR="${MUSTELA_WEBEXT_DIR}")
+        install(TARGETS mustela_view_gtk ARCHIVE DESTINATION lib)
+        if(MUSTELA_BUILD_TESTS)
+            add_executable(mustela_view_smoke src/tests/test_view_gtk.cpp)
+            target_link_libraries(mustela_view_smoke PRIVATE mustela_view_gtk)
+            target_include_directories(mustela_view_smoke PRIVATE ${WEBKIT_INCLUDE_DIRS})
+            target_link_directories(mustela_view_smoke PRIVATE ${WEBKIT_LIBRARY_DIRS})
+            target_link_libraries(mustela_view_smoke PRIVATE ${WEBKIT_LIBRARIES})
+            target_compile_options(mustela_view_smoke PRIVATE ${WEBKIT_CFLAGS_OTHER})
+            add_test(NAME mustela_view_smoke COMMAND mustela_view_smoke)
+            set_tests_properties(mustela_view_smoke PROPERTIES TIMEOUT 90)
+        endif()
+    endif()
 endif()
 
 if(MUSTELA_BUILD_SHELL)
