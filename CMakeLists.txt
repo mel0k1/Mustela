@@ -42,7 +42,11 @@ add_library(mustela_core STATIC
     src/core/bookmarks.cpp
     src/core/profile.cpp
     src/core/error_page.cpp)
-target_include_directories(mustela_core PUBLIC src src/core include)
+target_include_directories(mustela_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
 target_link_libraries(mustela_core PUBLIC mustela_warnings)
 
 install(TARGETS mustela_core EXPORT mustela_targets ARCHIVE DESTINATION lib)
