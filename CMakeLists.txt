@@ -77,7 +77,7 @@ if(MUSTELA_BUILD_VIEW)
             target_include_directories(mustela_view_win PRIVATE ${MUSTELA_WEBKIT_SDK}/include)
             target_link_directories(mustela_view_win PRIVATE ${MUSTELA_WEBKIT_SDK}/lib)
             target_link_libraries(mustela_view_win PRIVATE
-                WebKit WebCore WTF JavaScriptCore PAL user32 gdi32 ole32)
+                WebKit2 JavaScriptCore user32 gdi32 ole32)
             install(TARGETS mustela_view_win EXPORT mustela_targets ARCHIVE DESTINATION lib)
             export(EXPORT mustela_targets
                 FILE "${CMAKE_BINARY_DIR}/mustela-targets.cmake"
@@ -126,13 +126,13 @@ if(MUSTELA_BUILD_SHELL)
             target_include_directories(mustela PRIVATE ${MUSTELA_WEBKIT_SDK}/include)
             target_link_directories(mustela PRIVATE ${MUSTELA_WEBKIT_SDK}/lib)
             target_link_libraries(mustela PRIVATE
-                WebKit WebCore WTF JavaScriptCore PAL
+                WebKit2 JavaScriptCore
                 user32 gdi32 comctl32 comdlg32 ole32 shell32 psapi winhttp)
             if(MUSTELA_BUILD_BENCH)
                 add_executable(mustela-bench-win src/bench/bench_win.cpp)
                 target_include_directories(mustela-bench-win PRIVATE ${MUSTELA_WEBKIT_SDK}/include)
                 target_link_directories(mustela-bench-win PRIVATE ${MUSTELA_WEBKIT_SDK}/lib)
-                target_link_libraries(mustela-bench-win PRIVATE WebKit user32 ole32)
+                target_link_libraries(mustela-bench-win PRIVATE WebKit2 user32 ole32)
             endif()
         else()
             target_sources(mustela PRIVATE src/shell/win/shell_win_stub.cpp)

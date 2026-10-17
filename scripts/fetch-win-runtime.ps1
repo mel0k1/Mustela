@@ -118,11 +118,17 @@ try {
     foreach ($root in @((Join-Path $temp "req"), (Join-Path $temp "web"))) {
         Get-ChildItem -Path $root -Recurse -Include *.dll, *.exe, *.pdb -File |
             ForEach-Object { Copy-Item $_.FullName $runtime -Force }
+        Get-ChildItem -Path $root -Recurse -Directory -Filter *.resources |
+            ForEach-Object {
+                $target = Join-Path $runtime $_.Name
+                if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+                Copy-Item $_.FullName $target -Recurse
+            }
     }
     Write-Host ""
     Write-Host "runtime assembled in $runtime"
     Write-Host "smoke check: run $runtime\MiniBrowser.exe"
-    Write-Host "then copy WebKit.dll etc. next to mustela.exe or prepend the folder to PATH."
+    Write-Host "then copy WebKit2.dll etc. next to mustela.exe or prepend the folder to PATH."
     Write-Host "note: install the VC++ redistributable (vc_redist.x64.exe) if missing."
 } finally {
     Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue

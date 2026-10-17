@@ -18,8 +18,16 @@ if (-not (Test-Path $RuntimeDir)) {
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-$names = @("WebKit", "WebCore", "WTF", "JavaScriptCore", "PAL")
+$names = @("WebKit2", "JavaScriptCore", "WebKit", "WebCore", "WTF", "PAL")
+$found = @()
 foreach ($name in $names) {
+    $dll = Join-Path $RuntimeDir "$name.dll"
+    if (Test-Path $dll) { $found += $name }
+}
+if ($found.Count -eq 0) {
+    throw "none of the expected WebKit runtime DLLs found in $RuntimeDir"
+}
+foreach ($name in $found) {
     $dll = Join-Path $RuntimeDir "$name.dll"
     if (-not (Test-Path $dll)) {
         Write-Host "skip $name.dll (not in runtime)"
@@ -53,4 +61,4 @@ foreach ($name in $names) {
 }
 
 Write-Host ""
-Write-Host "import libraries written to $OutDir"
+Write-Host "import libraries written to $OutDir: $($found -join ', ')"

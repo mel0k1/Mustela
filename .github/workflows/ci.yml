@@ -147,11 +147,11 @@ jobs:
         shell: pwsh
         run: ./scripts/fetch-win-runtime.ps1 -Destination build/runtime
 
+      - uses: ilammy/msvc-dev-cmd@v1
+
       - name: Generate import libraries from runtime DLLs
         shell: pwsh
         run: ./scripts/make-win-import-libs.ps1 -RuntimeDir build/runtime/runtime/bin64 -OutDir build/sdk/lib
-
-      - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "-DMUSTELA_WEBKIT_SDK=${{ github.workspace }}\build\sdk"
