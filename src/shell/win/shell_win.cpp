@@ -19,6 +19,7 @@
 #include "blocklist.hpp"
 #include "bookmarks.hpp"
 #include "config.hpp"
+#include "discard.hpp"
 #include "error_page.hpp"
 #include "fingerprint.hpp"
 #include "fingerprint_scripts.hpp"
@@ -346,6 +347,11 @@ struct WinTab {
     bool error_page = false;
     std::string error_page_uri;
     mustela::LoadTimer load;
+    bool discarded = false;
+    std::string discard_uri;
+    std::string discard_title;
+    double discard_scale = 1.0;
+    double last_active_ms = 0;
 };
 
 Browser* browser = nullptr;
@@ -388,6 +394,7 @@ void find_run(Browser& b, int direction);
 void show_find_ui(Browser& b, bool show);
 std::unique_ptr<WinTab> make_tab(TabPrivacy request);
 std::string run_modal_prompt(const std::string& message, const std::string& default_text);
+void undiscard_tab_index(Browser& b, int index);
 
 void record_perf(Browser& b, const std::string& kind, double value_ms, std::int64_t value_bytes,
     const std::string& detail) {
@@ -595,8 +602,13 @@ void save_session_now(Browser& b) {
     for (std::unique_ptr<WinTab>& tab : b.tabs) {
         if (tab->privacy == TabPrivacy::Private) continue;
         mustela::SessionTab entry;
-        entry.url = tab->uri;
-        entry.title = tab->title;
+        if (tab->discarded) {
+            entry.url = tab->discard_uri;
+            entry.title = tab->discard_title;
+        } else {
+            entry.url = tab->uri;
+            entry.title = tab->title;
+        }
         if (tab->page) {
             WKBackForwardListRef list = WKPageGetBackForwardList(tab->page);
             if (list) {
@@ -770,13 +782,16 @@ void position_view(Browser& b, WinTab& tab) {
 
 void switch_tab(Browser& b, int index) {
     if (index < 0 || index >= static_cast<int>(b.tabs.size())) return;
+    if (b.tabs[static_cast<size_t>(index)]->discarded) undiscard_tab_index(b, index);
     if (b.active >= 0 && b.active < static_cast<int>(b.tabs.size()) && b.active != index) {
-        ShowWindow(WKViewGetWindow(b.tabs[static_cast<size_t>(b.active)]->view), SW_HIDE);
+        WinTab& old = *b.tabs[static_cast<size_t>(b.active)];
+        if (old.view) ShowWindow(WKViewGetWindow(old.view), SW_HIDE);
     }
     b.active = index;
     b.hover_link.clear();
     SendMessageW(b.tab_ctrl, TCM_SETCURSEL, static_cast<WPARAM>(index), 0);
     WinTab& tab = *b.tabs[static_cast<size_t>(index)];
+    tab.last_active_ms = mustela::Stopwatch::now_ms();
     position_view(b, tab);
     ShowWindow(WKViewGetWindow(tab.view), SW_SHOW);
     SetFocus(WKViewGetWindow(tab.view));
@@ -1767,6 +1782,7 @@ int open_tab(Browser& b, const std::string& url, TabPrivacy request) {
     std::unique_ptr<WinTab> tab = make_tab(request);
     WinTab* raw = tab.get();
     int index = append_tab(b, std::move(tab));
+    raw->last_active_ms = mustela::Stopwatch::now_ms();
 
     if (!url.empty()) navigate_tab(*raw, url);
     switch_tab(b, index);
@@ -1798,6 +1814,92 @@ void close_tab(Browser& b, int index) {
     }
     refresh_chrome(b);
     save_session_now(b);
+}
+
+void discard_tab_index(Browser& b, int index) {
+    if (index < 0 || index >= static_cast<int>(b.tabs.size())) return;
+    WinTab& tab = *b.tabs[static_cast<size_t>(index)];
+    if (tab.discarded || !tab.view) return;
+    tab.discard_uri = tab.uri;
+    tab.discard_title = tab.title.empty() ? tab.uri : tab.title;
+    tab.discard_scale = tab.scale;
+    if (tab.content) WKRelease(tab.content);
+    if (tab.preferences) WKRelease(tab.preferences);
+    if (tab.owns_store && tab.store) WKRelease(tab.store);
+    if (tab.view) WKRelease(tab.view);
+    tab.content = nullptr;
+    tab.preferences = nullptr;
+    tab.store = nullptr;
+    tab.owns_store = false;
+    tab.view = nullptr;
+    tab.page = nullptr;
+    tab.load.cancel();
+    tab.crashes = 0;
+    tab.error_page = false;
+    tab.error_page_uri.clear();
+    tab.discarded = true;
+    update_tab_item(b, index);
+    if (b.active == index) {
+        b.active = -1;
+        int next = index > 0 ? index - 1 : 0;
+        if (!b.tabs.empty()) switch_tab(b, next);
+    } else {
+        refresh_chrome(b);
+    }
+    save_session_now(b);
+}
+
+void undiscard_tab_index(Browser& b, int index) {
+    if (index < 0 || index >= static_cast<int>(b.tabs.size())) return;
+    WinTab& old = *b.tabs[static_cast<size_t>(index)];
+    if (!old.discarded) return;
+    std::string url = old.discard_uri;
+    std::string title = old.discard_title;
+    double scale = old.discard_scale;
+    TabPrivacy privacy = old.privacy;
+    std::unique_ptr<WinTab> fresh = make_tab(privacy);
+    fresh->uri = url;
+    fresh->title = title;
+    fresh->scale = scale;
+    fresh->last_active_ms = mustela::Stopwatch::now_ms();
+    apply_view_policy(*fresh, url);
+    apply_tab_scale(*fresh);
+    b.tabs[static_cast<size_t>(index)] = std::move(fresh);
+    if (!url.empty()) navigate_tab(*b.tabs[static_cast<size_t>(index)], url);
+    update_tab_item(b, index);
+}
+
+void maybe_discard_tabs(Browser& b) {
+    if (!b.memory_over) return;
+    if (mustela::memory_action_from(b.settings.memory_action) != mustela::MemoryAction::Discard) return;
+    double now = mustela::Stopwatch::now_ms();
+    std::vector<mustela::DiscardableTab> candidates;
+    candidates.reserve(b.tabs.size());
+    for (size_t i = 0; i < b.tabs.size(); ++i) {
+        const WinTab& tab = *b.tabs[i];
+        mustela::DiscardableTab item;
+        item.id = i;
+        item.active = static_cast<int>(i) == b.active;
+        item.discarded = tab.discarded;
+        item.loading = !tab.discarded && tab.load.active;
+        item.idle_ms = now - tab.last_active_ms;
+        candidates.push_back(item);
+    }
+    mustela::DiscardPolicy policy;
+    policy.action = mustela::MemoryAction::Discard;
+    policy.ceiling_mb = b.settings.memory_ceiling_mb;
+    policy.total_bytes = b.memory_bytes;
+    policy.min_idle_ms = 600000.0;
+    policy.max_per_pass = 1;
+    policy.min_alive = 1;
+    std::vector<std::size_t> picked = mustela::pick_discard_candidates(candidates, policy);
+    for (std::size_t id : picked) {
+        discard_tab_index(b, static_cast<int>(id));
+    }
+    if (!picked.empty()) {
+        flash_status(b, "discarded an inactive tab to stay under the memory ceiling");
+        save_session_now(b);
+    }
 }
 
 void fill_history_list(Browser& b) {
@@ -2103,7 +2205,7 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
         }
         case WM_SETFOCUS: {
             WinTab* tab = active_tab(b);
-            if (tab) SetFocus(WKViewGetWindow(tab->view));
+            if (tab && tab->view) SetFocus(WKViewGetWindow(tab->view));
             else SetFocus(b.url_entry);
             return 0;
         }
@@ -2127,6 +2229,7 @@ LRESULT CALLBACK main_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam)
             }
             if (wparam == TIMER_MEMORY) {
                 sample_memory(b);
+                maybe_discard_tabs(b);
             }
             return 0;
         case WM_APP_RELOAD_CHANGED:

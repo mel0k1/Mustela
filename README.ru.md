@@ -4,7 +4,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-20-00599C)
-![status](https://img.shields.io/badge/status-M10_platform_dressing-e0a03d)
+![status](https://img.shields.io/badge/status-M13_tab_discarding-e0a03d)
 
 Приватный кроссплатформенный браузерный движок на базе WebKit.
 
@@ -20,6 +20,7 @@ English version: [README.md](README.md)
 
 ## Статус
 
+`v0.22.0` закрывает последний перфоманс-хвост — выгрузку вкладок (M13). Политика ядра (`src/core/discard.hpp`) выбирает жертву, когда RSS дерева процессов превышает `perf.memory_ceiling_mb` при `perf.memory_action = "discard"`: никогда активная, никогда загружающаяся, никогда уже выгруженная — только фоновые вкладки без активности 10+ минут, старейшие первыми, по одной за проход. Оба порта уничтожают живой view — GTK заменяет страницу блокнота заглушкой, Windows освобождает WKView/WKPage — предварительно запоминая состояние сессии, оставляют вкладку в панели и пересобирают её обычным путём создания вкладок с восстановлением back/forward-истории при возврате пользователя. Выгруженные вкладки сохраняются как обычные URL и переживают перезапуск. Сьют — 730 проверок, в CI гоняется под ASan + UBSan.
 `v0.19.0` — view-поверхность для встраивания, Kiwi (V1). `include/mustela/view.hpp` — порт-нейтральный view-API без единого WebKit-типа: `ViewSession` владеет парой контекстов (обычный и эфемерный приватный), `View` оборачивает один web-view и отдаёт GTK-виджет через `native_widget()`, колбэки уровня сессии несут загрузки, уровня view — навигацию, загрузку страницы, коммиты, страницы ошибок, favicon, hover по ссылкам, JS-диалоги, разрешения, сертификаты, аутентификацию, попапы и закрытие. `libmustela_view_gtk.a` (`src/view/gtk/view_gtk.cpp`, собирается за `MUSTELA_BUILD_VIEW` вне харнесса) сама применяет весь privacy-конвейер — cookie-политику, ITP, TLS, прокси с DoH, web-расширение Sec-GPC, фильтры шрифтов и трекер-блоклиста, hardening, fingerprint-сценарии, GPC-скрипт и пер-сайтовый dressing (zoom/UA/CSS) на коммите — плюс брендированные страницы ошибок, точечную очистку cookie запрещённых origin, persistence favicon и восстановление после крэшей. CI гоняет весь ctest-сьют (теперь с `mustela_view_smoke`) под xvfb; треки санитайзеров и clang-tidy собираются с view off. Сьют — 702 проверки ядра.
 `v0.18.0` закрывает CI-рычаги и харнесс-пункты Kiwi. В CI приезжает трек санитайзеров — сьют ядра строго гоняется под ASan + UBSan с детекцией утечек — и advisory-трек clang-tidy по `src/core`; релизный job по тегу собирает deb и переносимый tarball через CPack и прикладывает их к GitHub Release (Windows-бандл ждёт закреплённого WinCairo-рантайма — это честно сказано в примечаниях). GTK-харнесс теперь применяет dressing из K1: пер-сайтовые zoom, user-agent и CSS прилетают на коммите страницы (`SiteDecision` несёт их из `resolve_site`), а окно site-rules правит все три. У form-autofill появился референс-UI: `shell.autofill` заполняет видимые не-парольные поля при загрузке, `shell.autofill_save` сохраняет отправленные значения в стор профиля — оба выключены по умолчанию и оба пропускают приватные вкладки; Kiwi получает ту же поверхность ядра. `MUSTELA_CORE_API_VERSION` — 3; сьют — 702 проверки.
 

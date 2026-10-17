@@ -172,6 +172,15 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 - CI: the Linux track runs the whole ctest suite under xvfb (the new `mustela_view_smoke` — session + view + data: URL + title/commit/zoom checks — needs a display); sanitizers and clang-tidy configure with the view off (WebKit stays out of the sanitizer run).
 - Test suite stays 702 core checks; the view smoke adds 12 runtime checks under ctest.
 
+## M13 — Tab discarding (done, v0.22.0)
+
+- Core policy (`src/core/discard.hpp`, pure and unit-tested): `pick_discard_candidates` walks the tab list and returns the victims for one pass — never the active tab, never a loading tab, never an already-discarded one, only background tabs idle for 10+ minutes (configurable `min_idle_ms`), ordered oldest-idle first, capped by `max_per_pass` and a `min_alive` floor. The trigger is `perf.memory_action = "discard"` plus `ceiling_exceeded` over the sampled process-tree RSS; the default `warn` keeps today's status-bar-only behavior. (done)
+- GTK port: the memory timer builds the candidate list (active page, load state, idle time since the last activation), and a picked tab is discarded — session state serialized to base64 into the tab record, the notebook page replaced by a "Tab unloaded — switch to it to restore" placeholder. Returning to the tab schedules an idle undiscard (page mutation never happens inside the GTK `switch-page` emission): a fresh view is created through the normal path, the captured `WebKitWebViewSessionState` is restored with full back/forward history, and the placeholder page is swapped out at the same position. Session save/restore writes discarded tabs as plain URLs, so they survive a restart. (done)
+- Windows port: the same policy over the same core call — `discard_tab_index` releases the WKUserContentController/WKPreferences/WKView references after saving uri/title/scale, keeps the tab strip entry, and `undiscard_tab_index` rebuilds through `make_tab` with the saved URL (tab-URL restore, matching the port's session-restore honesty); `switch_tab` restores synchronously before touching the view. (done)
+- Settings: `perf.memory_action = "warn" | "discard"` (default `warn`), validated on load like the other enum keys and round-tripped by `save_settings`. (done)
+- Honest limits: per-view suspend stays impossible upstream — discard is destroy-and-recreate; a discarded private tab loses its in-memory state by design (its store is ephemeral); on Windows a restored tab reloads its URL instead of full session state (no C API session-state surface, same as session restore there).
+- Test suite 702 → 730 checks: memory-action parsing and round-trip, warn/discard gating, ceiling gating, victim selection order, loading/discarded/active/min-idle exclusions, per-pass and min-alive caps. (done)
+
 ## Kiwi — product browser
 
 - The product browser lives in the separate [Kiwi](https://github.com/mel0k1/Kiwi) repository; mustela-shell stays the engine's test harness.

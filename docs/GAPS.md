@@ -43,7 +43,7 @@ The web platform itself is not the gap: rendering, CSS, JavaScript, media, stora
 
 **Upstream-dependent leftovers (unchanged):** per-origin cookie wipe and disk cache clear on Windows, ITP visibility, HTML5 element fullscreen on Win, `Sec-GPC` header on Win (no request-header surface in the C API).
 
-**Performance and CI leftovers (unchanged):** tab discarding above the memory ceiling, process-model hot-reload, cold/warm startup distinction, executing `mustela-bench-win` (needs WinCairo runtime). Sanitizers (ASan/UBSan strict, clang-tidy advisory) and the Linux release/packaging job shipped in M12.
+**Performance and CI leftovers (unchanged):** process-model hot-reload, cold/warm startup distinction, executing `mustela-bench-win` (needs WinCairo runtime). ~~Tab discarding above the memory ceiling~~ — done in M13. Sanitizers (ASan/UBSan strict, clang-tidy advisory) and the Linux release/packaging job shipped in M12.
 
 ## Browsing platform gaps (priority 1)
 
@@ -82,7 +82,7 @@ The privacy core is the product's identity; these are the next honest wins.
 
 Leftovers from M4 plus what the bench variant opened up.
 
-- The memory ceiling only warns. There is no tab discarding or per-view suspend; WebKitGTK and the WinCairo C API expose no per-view suspend today. Possible core-side mitigation: track per-tab idle/load state and close the oldest inactive tab above the ceiling, behind a `perf.memory_action` switch. (core + ports)
+- ~~The memory ceiling only warns. There is no tab discarding or per-view suspend; WebKitGTK and the WinCairo C API expose no per-view suspend today. Possible core-side mitigation: track per-tab idle/load state and close the oldest inactive tab above the ceiling, behind a `perf.memory_action` switch.~~ — done in M13: a core policy (`discard.hpp`) picks the least-recently-active, non-loading, 10+-minutes-idle background tab when the ceiling is exceeded and `perf.memory_action = "discard"`; both ports destroy the view (session state captured first), keep the tab in the strip and rebuild it with its history on reactivation. Per-view suspend remains impossible upstream — discard is destroy-and-recreate. (core + ports)
 - `perf.process_model` is applied at startup only. A settings change requires a restart; hot-reload does not re-apply it. (ports)
 - Bench coverage. `mustela-bench` runs in CI; `mustela-bench-win` compiles in CI but cannot run — GitHub Windows runners have no WinCairo runtime DLLs. Options: a release job that downloads a WinCairo runtime build, or a self-hosted Windows runner. Until then Windows numbers come from manual runs.
 - Startup budget has no cold/warm distinction; first run after install (profile creation, filter compilation) is measured against the same number as a warm start. (core)
@@ -138,6 +138,7 @@ Leftovers from M4 plus what the bench variant opened up.
 | Bookmarks (star + window) | yes | yes |
 | Favicons in tabs | yes | no (C API limit) |
 | Session restore | yes (full history) | yes (tab URLs) |
+| Tab discarding under the memory ceiling | yes (full history on restore) | yes (tab URL on restore) |
 | GPC (Sec-GPC header + JS) | yes (web extension) | JS only (no C API header surface) |
 | Tracker blocklist | yes | yes |
 | Local proxy: network blocking + DoH | yes (`proxy.mode`) | yes (env hook, startup only) |
@@ -164,5 +165,6 @@ Leftovers from M4 plus what the bench variant opened up.
 10. V1 — embedding view surface (v0.19.0): shipped — `include/mustela/view.hpp` (port-neutral, zero WebKit types) with `libmustela_view_gtk.a` implementing context-level privacy, per-view dressing, error pages, downloads, dialogs, permissions, popups and crash recovery; `mustela_view_smoke` in ctest under xvfb.
 11. V2 — privacy-center view surface (v0.20.0): shipped — `fetch_website_data` / `remove_website_data` / `clear_website_data` on `ViewSession` (per-origin enumeration, targeted removal, aged clear through the WebKit data manager) and `View::active_site_policy()` for embedder indicators; smoke coverage extended.
 12. Kiwi K2 — the privacy center (Kiwi 0.2.0 on the v0.20.0 surface): shipped — per-site override editor with a live toolbar indicator (`View::active_site_policy`) and stored-data management screens (`fetch`/`remove`/`clear_website_data`).
-13. Kiwi K3 — library and settings (Kiwi 0.3.0): shipped — a bookmarks manager over the core `BookmarkStore`, a search engines editor over `Settings.search_engines` with `resolve_entry` `!keyword` shortcuts, and a profile manager over `ProfileRegistry` (per-profile data roots, restart-safe switching) — pure embedder work, zero engine changes. Remaining engine leftovers (bench-win execution, Windows runtime pin, tab discarding, process-model hot-reload, cold/warm startup) stay documented here.
+13. Kiwi K3 — library and settings (Kiwi 0.3.0): shipped — a bookmarks manager over the core `BookmarkStore`, a search engines editor over `Settings.search_engines` with `resolve_entry` `!keyword` shortcuts, and a profile manager over `ProfileRegistry` (per-profile data roots, restart-safe switching) — pure embedder work, zero engine changes. Remaining engine leftovers after M13 (bench-win execution, Windows runtime pin, process-model hot-reload, cold/warm startup) stay documented here.
 14. V3 — view slice 2 (v0.21.0, view API 2 → 3): shipped — find-in-page (`View::find`/`find_next`/`find_previous`/`find_finish`/`find_text` over `WebKitFindController`, `find_result` callback), devtools (`View::show_devtools`/`hide_devtools`/`devtools_attached` docking `WebKitWebInspector` with developer extras enabled on demand), and the context menu surface (`ViewCallbacks::context_menu` with `ContextMenuInfo` hit-test flags, returning true suppresses the default menu) plus action backing for embedder menus (`View::execute_edit_command`, `View::selected_text` through `evaluate_javascript`); smoke coverage extended to find hit/miss, selected-text callback, devtools dock/close and context-menu interception. Kiwi 0.4.0 layers the MD3 find bar, the MD3 context menu and a devtools toggle on top.
+15. M13 — tab discarding (v0.22.0): shipped — a core discard policy (`src/core/discard.hpp`): when the process-tree RSS exceeds `perf.memory_ceiling_mb` and `perf.memory_action = "discard"`, the least-recently-active, non-loading, 10+-minutes-idle background tab is discarded — both ports destroy the live view (GTK replaces the notebook page with a placeholder, Windows releases the WKView/WKPage) after capturing the session state, keep the tab in the strip, and rebuild it through the normal tab-creation path with the captured back/forward history restored when the user returns; session save/restore treats discarded tabs as URLs so they survive a restart; 730-check suite (discard policy unit tests included).

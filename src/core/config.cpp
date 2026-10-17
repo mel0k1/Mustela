@@ -177,6 +177,20 @@ std::string proxy_mode_value(std::map<std::string, std::string>& pairs, const st
     return fallback;
 }
 
+std::string memory_action_value(std::map<std::string, std::string>& pairs, const std::string& key,
+    const std::string& fallback, SettingsReport* report) {
+    auto it = pairs.find(key);
+    if (it == pairs.end()) return fallback;
+    std::string value = it->second;
+    pairs.erase(it);
+    if (value == "warn" || value == "discard") {
+        if (report) ++report->applied;
+        return value;
+    }
+    if (report) report->invalid_values.push_back(key);
+    return fallback;
+}
+
 std::string downloads_mode_value(std::map<std::string, std::string>& pairs, const std::string& key,
     const std::string& fallback, SettingsReport* report) {
     auto it = pairs.find(key);
@@ -243,6 +257,7 @@ Settings load_settings(const std::string& path, SettingsReport& report) {
     apply(pairs, "perf.process_model", settings.process_model, &report);
     apply(pairs, "perf.startup_budget_ms", settings.startup_budget_ms, &report);
     apply(pairs, "perf.memory_ceiling_mb", settings.memory_ceiling_mb, &report);
+    settings.memory_action = memory_action_value(pairs, "perf.memory_action", settings.memory_action, &report);
     apply(pairs, "perf.log", settings.perf_log, &report);
     apply(pairs, "downloads.dir", settings.downloads_dir, &report);
     settings.downloads_mode = downloads_mode_value(pairs, "downloads.mode", settings.downloads_mode, &report);
@@ -364,6 +379,7 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "process_model = \"" << settings.process_model << "\"\n";
     out << "startup_budget_ms = " << settings.startup_budget_ms << "\n";
     out << "memory_ceiling_mb = " << settings.memory_ceiling_mb << "\n";
+    out << "memory_action = \"" << settings.memory_action << "\"\n";
     out << "log = " << (settings.perf_log ? "true" : "false") << "\n";
     out << "\n[downloads]\n";
     out << "dir = \"" << settings.downloads_dir << "\"\n";

@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
 #include <cstdio>
 #include <ctime>
@@ -24,6 +25,7 @@
 #include "bookmarks.hpp"
 #include "autofill.hpp"
 #include "config.hpp"
+#include "discard.hpp"
 #include "error_page.hpp"
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
@@ -113,6 +115,7 @@ struct Browser {
     GApplication* gapp = nullptr;
     unsigned notification_seq = 0;
     std::vector<std::unique_ptr<Tab>> tabs;
+    std::vector<Tab*> undiscard_pending;
 };
 
 Browser* browser = nullptr;
@@ -141,6 +144,9 @@ Tab* tab_from_view(Browser& b, WebKitWebView* view);
 void connect_tab_signals(Tab* tab);
 void run_find(Browser& b, int direction);
 void show_find_bar(Browser& b, bool show);
+void discard_tab(Browser& b, Tab* tab);
+void undiscard_tab(Browser& b, Tab* tab);
+void save_session_now(Browser& b);
 
 void record_perf(Browser& b, const std::string& kind, double value_ms, std::int64_t value_bytes,
     const std::string& detail) {
@@ -216,7 +222,42 @@ void sample_memory(Browser& b) {
 }
 
 gboolean on_memory_timer(gpointer) {
-    if (browser) sample_memory(*browser);
+    if (!browser) return G_SOURCE_CONTINUE;
+    Browser& b = *browser;
+    sample_memory(b);
+    if (!b.memory_over) return G_SOURCE_CONTINUE;
+    if (mustela::memory_action_from(b.settings.memory_action) != mustela::MemoryAction::Discard) {
+        return G_SOURCE_CONTINUE;
+    }
+    double now = mustela::Stopwatch::now_ms();
+    gint current = gtk_notebook_get_current_page(GTK_NOTEBOOK(b.notebook));
+    std::vector<mustela::DiscardableTab> candidates;
+    candidates.reserve(b.tabs.size());
+    for (size_t i = 0; i < b.tabs.size(); ++i) {
+        const Tab& tab = *b.tabs[i];
+        mustela::DiscardableTab item;
+        item.id = i;
+        item.active = static_cast<gint>(i) == current;
+        item.discarded = tab.discarded;
+        item.loading = !tab.discarded && tab.load.active;
+        item.idle_ms = now - tab.last_active_ms;
+        candidates.push_back(item);
+    }
+    mustela::DiscardPolicy policy;
+    policy.action = mustela::MemoryAction::Discard;
+    policy.ceiling_mb = b.settings.memory_ceiling_mb;
+    policy.total_bytes = b.memory_bytes;
+    policy.min_idle_ms = 600000.0;
+    policy.max_per_pass = 1;
+    policy.min_alive = 1;
+    std::vector<std::size_t> picked = mustela::pick_discard_candidates(candidates, policy);
+    for (std::size_t id : picked) {
+        discard_tab(b, b.tabs[id].get());
+    }
+    if (!picked.empty()) {
+        flash_status("discarded an inactive tab to stay under the memory ceiling");
+        save_session_now(b);
+    }
     return G_SOURCE_CONTINUE;
 }
 
@@ -234,6 +275,11 @@ Tab* active_tab(Browser& b) {
     gint page = gtk_notebook_get_current_page(GTK_NOTEBOOK(b.notebook));
     if (page < 0 || page >= static_cast<gint>(b.tabs.size())) return nullptr;
     return b.tabs[static_cast<size_t>(page)].get();
+}
+
+WebKitWebView* active_view(Browser& b) {
+    Tab* tab = active_tab(b);
+    return tab && !tab->discarded ? tab->view() : nullptr;
 }
 
 gint tab_index(const Browser& b, const Tab* tab) {
@@ -302,7 +348,7 @@ void refresh_status(Browser& b) {
 
 void refresh_chrome(Browser& b) {
     Tab* tab = active_tab(b);
-    if (tab) {
+    if (tab && !tab->discarded) {
         if (!gtk_widget_has_focus(b.url_entry)) {
             gtk_entry_set_text(GTK_ENTRY(b.url_entry), tab->uri().c_str());
         }
@@ -626,6 +672,7 @@ void apply_view_policy(Browser& b, WebKitWebView* view, const std::string& uri, 
 
 void apply_policies_to_tabs(Browser& b) {
     for (std::unique_ptr<Tab>& tab : b.tabs) {
+        if (tab->discarded) continue;
         harden_view(b, tab->view());
         apply_view_policy(b, tab->view(), tab->uri(), tab.get());
     }
@@ -710,22 +757,28 @@ void save_session_now(Browser& b) {
     for (std::unique_ptr<Tab>& tab : b.tabs) {
         if (tab->is_private()) continue;
         mustela::SessionTab entry;
-        entry.url = tab->uri();
-        entry.title = tab->title();
-        WebKitWebViewSessionState* state = webkit_web_view_get_session_state(tab->view());
-        if (state) {
-            GBytes* bytes = webkit_web_view_session_state_serialize(state);
-            if (bytes) {
-                gsize size = 0;
-                gconstpointer raw = g_bytes_get_data(bytes, &size);
-                if (raw && size) {
-                    gchar* encoded = g_base64_encode(static_cast<const guchar*>(raw), size);
-                    entry.state = encoded;
-                    g_free(encoded);
+        if (tab->discarded) {
+            entry.url = tab->discard_uri;
+            entry.title = tab->discard_title;
+            entry.state = tab->discard_state;
+        } else {
+            entry.url = tab->uri();
+            entry.title = tab->title();
+            WebKitWebViewSessionState* state = webkit_web_view_get_session_state(tab->view());
+            if (state) {
+                GBytes* bytes = webkit_web_view_session_state_serialize(state);
+                if (bytes) {
+                    gsize size = 0;
+                    gconstpointer raw = g_bytes_get_data(bytes, &size);
+                    if (raw && size) {
+                        gchar* encoded = g_base64_encode(static_cast<const guchar*>(raw), size);
+                        entry.state = encoded;
+                        g_free(encoded);
+                    }
+                    g_bytes_unref(bytes);
                 }
-                g_bytes_unref(bytes);
+                webkit_web_view_session_state_unref(state);
             }
-            webkit_web_view_session_state_unref(state);
         }
         data.tabs.push_back(std::move(entry));
     }
@@ -759,6 +812,83 @@ void restore_tab_session(Browser&, Tab* tab, const mustela::SessionTab& entry) {
         }
     }
     if (!entry.url.empty()) webkit_web_view_load_uri(tab->view(), entry.url.c_str());
+}
+
+void discard_tab(Browser& b, Tab* tab) {
+    if (!tab || tab->discarded || !tab->view()) return;
+    tab->discard_uri = tab->uri();
+    tab->discard_title = tab->title();
+    WebKitWebViewSessionState* state = webkit_web_view_get_session_state(tab->view());
+    if (state) {
+        GBytes* bytes = webkit_web_view_session_state_serialize(state);
+        if (bytes) {
+            gsize size = 0;
+            gconstpointer raw = g_bytes_get_data(bytes, &size);
+            if (raw && size) {
+                gchar* encoded = g_base64_encode(static_cast<const guchar*>(raw), size);
+                tab->discard_state = encoded;
+                g_free(encoded);
+            }
+            g_bytes_unref(bytes);
+        }
+        webkit_web_view_session_state_unref(state);
+    }
+    tab->load.cancel();
+    tab->crashes = 0;
+    tab->error_page = false;
+    tab->error_page_uri.clear();
+    gint idx = tab_index(b, tab);
+    tab->set_view(nullptr);
+    tab->discarded = true;
+    GtkWidget* placeholder = gtk_label_new("Tab unloaded — switch to it to restore");
+    gtk_label_set_line_wrap(GTK_LABEL(placeholder), TRUE);
+    gtk_widget_set_halign(placeholder, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(placeholder, GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_start(placeholder, 16);
+    gtk_widget_set_margin_end(placeholder, 16);
+    gtk_widget_show(placeholder);
+    if (idx >= 0) {
+        gint current = gtk_notebook_get_current_page(GTK_NOTEBOOK(b.notebook));
+        gtk_notebook_remove_page(GTK_NOTEBOOK(b.notebook), idx);
+        gtk_notebook_insert_page(GTK_NOTEBOOK(b.notebook), placeholder, tab->label(), idx);
+        if (current == idx) {
+            gint target = idx > 0 ? idx - 1 : 0;
+            if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(b.notebook)) > 0) {
+                gtk_notebook_set_current_page(GTK_NOTEBOOK(b.notebook), target);
+            }
+        }
+    }
+    refresh_chrome(b);
+}
+
+void undiscard_tab(Browser& b, Tab* tab) {
+    if (!tab || !tab->discarded) return;
+    gint idx = tab_index(b, tab);
+    if (idx < 0) return;
+    WebKitWebContext* context = tab->is_private() ? b.private_context : b.normal_context;
+    WebKitWebView* view = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(context));
+    harden_view(b, view);
+    webkit_web_view_set_zoom_level(view, b.settings.zoom_default);
+    apply_view_policy(b, view, tab->discard_uri, tab);
+    tab->set_view(view);
+    tab->discarded = false;
+    mustela::SessionTab entry;
+    entry.url = tab->discard_uri;
+    entry.title = tab->discard_title;
+    entry.state = tab->discard_state;
+    tab->discard_uri.clear();
+    tab->discard_title.clear();
+    tab->discard_state.clear();
+    tab->last_active_ms = mustela::Stopwatch::now_ms();
+    connect_tab_signals(tab);
+    gtk_notebook_remove_page(GTK_NOTEBOOK(b.notebook), idx);
+    gtk_notebook_insert_page(GTK_NOTEBOOK(b.notebook), GTK_WIDGET(view), tab->label(), idx);
+    restore_tab_session(b, tab, entry);
+    gtk_widget_show(GTK_WIDGET(view));
+    if (gtk_notebook_get_current_page(GTK_NOTEBOOK(b.notebook)) != idx) {
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(b.notebook), idx);
+    }
+    refresh_chrome(b);
 }
 
 void on_origin_cookies_removed(GObject* object, GAsyncResult* result, gpointer) {
@@ -899,9 +1029,9 @@ void on_destroy(GtkWidget*, gpointer) {
 }
 
 void print_page(Browser& b) {
-    Tab* tab = active_tab(b);
-    if (!tab) return;
-    WebKitPrintOperation* operation = webkit_print_operation_new(tab->view());
+    WebKitWebView* view = active_view(b);
+    if (!view) return;
+    WebKitPrintOperation* operation = webkit_print_operation_new(view);
     webkit_print_operation_run_dialog(operation, GTK_WINDOW(b.window));
     g_object_unref(operation);
 }
@@ -927,9 +1057,9 @@ void on_snapshot_ready(WebKitWebView* view, GAsyncResult* result, gpointer) {
 }
 
 void take_screenshot(Browser& b) {
-    Tab* tab = active_tab(b);
-    if (!tab) return;
-    webkit_web_view_get_snapshot(tab->view(), WEBKIT_SNAPSHOT_REGION_VISIBLE, WEBKIT_SNAPSHOT_OPTIONS_NONE,
+    WebKitWebView* view = active_view(b);
+    if (!view) return;
+    webkit_web_view_get_snapshot(view, WEBKIT_SNAPSHOT_REGION_VISIBLE, WEBKIT_SNAPSHOT_OPTIONS_NONE,
         nullptr, reinterpret_cast<GAsyncReadyCallback>(on_snapshot_ready), nullptr);
 }
 
@@ -986,6 +1116,7 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
     Browser& b = *browser;
     GdkModifierType mods = static_cast<GdkModifierType>(event->state & gtk_accelerator_get_default_mod_mask());
     Tab* tab = active_tab(b);
+    WebKitWebView* view = tab && !tab->discarded ? tab->view() : nullptr;
 
     if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_t) {
         open_tab(b, b.settings.homepage.c_str(), b.privacy.default_private);
@@ -1023,12 +1154,12 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
         print_page(b);
         return TRUE;
     }
-    if (mods == (GDK_CONTROL_MASK | GDK_MOD1_MASK) && event->keyval == GDK_KEY_s) {
-        take_screenshot(b);
-        return TRUE;
-    }
     if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_s) {
         save_page_as(b);
+        return TRUE;
+    }
+    if (mods == (GDK_CONTROL_MASK | GDK_MOD1_MASK) && event->keyval == GDK_KEY_s) {
+        take_screenshot(b);
         return TRUE;
     }
     if (mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && event->keyval == GDK_KEY_O) {
@@ -1041,19 +1172,19 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
         return TRUE;
     }
     if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_r) {
-        if (tab) webkit_web_view_reload(tab->view());
+        if (view) webkit_web_view_reload(view);
         return TRUE;
     }
     if (mods == 0 && event->keyval == GDK_KEY_F5) {
-        if (tab) webkit_web_view_reload(tab->view());
+        if (view) webkit_web_view_reload(view);
         return TRUE;
     }
     if (mods == GDK_MOD1_MASK && event->keyval == GDK_KEY_Left) {
-        if (tab && webkit_web_view_can_go_back(tab->view())) webkit_web_view_go_back(tab->view());
+        if (view && webkit_web_view_can_go_back(view)) webkit_web_view_go_back(view);
         return TRUE;
     }
     if (mods == GDK_MOD1_MASK && event->keyval == GDK_KEY_Right) {
-        if (tab && webkit_web_view_can_go_forward(tab->view())) webkit_web_view_go_forward(tab->view());
+        if (view && webkit_web_view_can_go_forward(view)) webkit_web_view_go_forward(view);
         return TRUE;
     }
     if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_f) {
@@ -1062,21 +1193,21 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
     }
     if (mods == GDK_CONTROL_MASK && (event->keyval == GDK_KEY_plus || event->keyval == GDK_KEY_equal
         || event->keyval == GDK_KEY_KP_Add)) {
-        if (tab) {
-            double level = webkit_web_view_get_zoom_level(tab->view());
-            webkit_web_view_set_zoom_level(tab->view(), zoom_next(level, 1));
+        if (view) {
+            double level = webkit_web_view_get_zoom_level(view);
+            webkit_web_view_set_zoom_level(view, zoom_next(level, 1));
         }
         return TRUE;
     }
     if (mods == GDK_CONTROL_MASK && (event->keyval == GDK_KEY_minus || event->keyval == GDK_KEY_KP_Subtract)) {
-        if (tab) {
-            double level = webkit_web_view_get_zoom_level(tab->view());
-            webkit_web_view_set_zoom_level(tab->view(), zoom_next(level, -1));
+        if (view) {
+            double level = webkit_web_view_get_zoom_level(view);
+            webkit_web_view_set_zoom_level(view, zoom_next(level, -1));
         }
         return TRUE;
     }
     if (mods == GDK_CONTROL_MASK && (event->keyval == GDK_KEY_0 || event->keyval == GDK_KEY_KP_0)) {
-        if (tab) webkit_web_view_set_zoom_level(tab->view(), 1.0);
+        if (view) webkit_web_view_set_zoom_level(view, 1.0);
         return TRUE;
     }
     if (mods == 0 && event->keyval == GDK_KEY_F11) {
@@ -1091,7 +1222,7 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
             show_find_bar(b, FALSE);
             return TRUE;
         }
-        if (tab) webkit_web_view_stop_loading(tab->view());
+        if (view) webkit_web_view_stop_loading(view);
         return TRUE;
     }
     return FALSE;
@@ -1202,18 +1333,18 @@ void on_view_load_failed(WebKitWebView* view, WebKitLoadEvent event, const char*
 }
 
 void on_go_back(GtkButton*, gpointer) {
-    Tab* tab = active_tab(*browser);
-    if (tab && webkit_web_view_can_go_back(tab->view())) webkit_web_view_go_back(tab->view());
+    WebKitWebView* view = active_view(*browser);
+    if (view && webkit_web_view_can_go_back(view)) webkit_web_view_go_back(view);
 }
 
 void on_go_forward(GtkButton*, gpointer) {
-    Tab* tab = active_tab(*browser);
-    if (tab && webkit_web_view_can_go_forward(tab->view())) webkit_web_view_go_forward(tab->view());
+    WebKitWebView* view = active_view(*browser);
+    if (view && webkit_web_view_can_go_forward(view)) webkit_web_view_go_forward(view);
 }
 
 void on_reload(GtkButton*, gpointer) {
-    Tab* tab = active_tab(*browser);
-    if (tab) webkit_web_view_reload(tab->view());
+    WebKitWebView* view = active_view(*browser);
+    if (view) webkit_web_view_reload(view);
 }
 
 void on_new_tab(GtkButton*, gpointer) {
@@ -1227,11 +1358,11 @@ void on_private_toggled(GtkToggleButton*, gpointer) {
 }
 
 void on_url_activate(GtkEntry*, gpointer) {
-    Tab* tab = active_tab(*browser);
-    if (!tab) return;
+    WebKitWebView* view = active_view(*browser);
+    if (!view) return;
     const gchar* text = gtk_entry_get_text(GTK_ENTRY(browser->url_entry));
     std::string url = mustela::resolve_entry(text, browser->settings);
-    if (!url.empty()) webkit_web_view_load_uri(tab->view(), url.c_str());
+    if (!url.empty()) webkit_web_view_load_uri(view, url.c_str());
 }
 
 void on_drop_data_received(GtkWidget*, GdkDragContext* context, gint, gint,
@@ -1257,13 +1388,39 @@ void on_drop_data_received(GtkWidget*, GdkDragContext* context, gint, gint,
     }
     std::string url = mustela::resolve_entry(text, b.settings);
     Tab* tab = active_tab(b);
-    if (tab && !url.empty()) webkit_web_view_load_uri(tab->view(), url.c_str());
+    if (tab && !tab->discarded && !url.empty()) webkit_web_view_load_uri(tab->view(), url.c_str());
     gtk_drag_finish(context, TRUE, FALSE, time);
 }
 
-void on_switch_page(GtkNotebook*, GtkWidget*, guint, gpointer) {
+gboolean undiscard_idle(gpointer data) {
+    if (!browser) return G_SOURCE_REMOVE;
+    Tab* tab = static_cast<Tab*>(data);
+    std::vector<Tab*>& pending = browser->undiscard_pending;
+    pending.erase(std::remove(pending.begin(), pending.end(), tab), pending.end());
+    bool alive = false;
+    for (std::unique_ptr<Tab>& t : browser->tabs) {
+        if (t.get() == tab) {
+            alive = true;
+            break;
+        }
+    }
+    if (alive && tab->discarded) undiscard_tab(*browser, tab);
+    return G_SOURCE_REMOVE;
+}
+
+void on_switch_page(GtkNotebook*, GtkWidget*, guint page_num, gpointer) {
     gtk_entry_set_progress_fraction(GTK_ENTRY(browser->url_entry), 0.0);
     browser->hover_link.clear();
+    if (page_num < browser->tabs.size()) {
+        Tab* tab = browser->tabs[page_num].get();
+        tab->last_active_ms = mustela::Stopwatch::now_ms();
+        if (tab->discarded
+            && std::find(browser->undiscard_pending.begin(), browser->undiscard_pending.end(), tab)
+                == browser->undiscard_pending.end()) {
+            browser->undiscard_pending.push_back(tab);
+            g_timeout_add(0, undiscard_idle, tab);
+        }
+    }
     refresh_chrome(*browser);
     save_session_now(*browser);
     if (browser->find_bar && gtk_widget_get_visible(browser->find_bar)) {
@@ -1605,7 +1762,7 @@ void on_find_failed(WebKitFindController*, gpointer user_data) {
 
 void run_find(Browser& b, int direction) {
     Tab* tab = active_tab(b);
-    if (!tab || !b.find_entry) return;
+    if (!tab || tab->discarded || !b.find_entry) return;
     const gchar* raw = gtk_entry_get_text(GTK_ENTRY(b.find_entry));
     std::string query = mustela::sanitize_find_query(raw ? raw : "");
     WebKitFindController* finder = webkit_web_view_get_find_controller(tab->view());
@@ -1636,9 +1793,11 @@ void show_find_bar(Browser& b, bool show) {
     b.find_query.clear();
     if (b.find_label) gtk_label_set_text(GTK_LABEL(b.find_label), "");
     Tab* tab = active_tab(b);
-    if (tab) webkit_find_controller_search_finish(webkit_web_view_get_find_controller(tab->view()));
+    if (tab && !tab->discarded) {
+        webkit_find_controller_search_finish(webkit_web_view_get_find_controller(tab->view()));
+    }
     gtk_widget_hide(b.find_bar);
-    if (tab) gtk_widget_grab_focus(GTK_WIDGET(tab->view()));
+    if (tab && !tab->discarded) gtk_widget_grab_focus(GTK_WIDGET(tab->view()));
 }
 
 void on_find_search_changed(GtkWidget*, gpointer) {
@@ -1670,6 +1829,10 @@ gboolean on_find_entry_key(GtkWidget*, GdkEventKey* event, gpointer) {
     return FALSE;
 }
 
+void on_save_page_action(GSimpleAction*, GVariant*, gpointer) {
+    save_page_as(*browser);
+}
+
 gboolean on_context_menu(WebKitWebView*, WebKitContextMenu* menu, GdkEvent*,
     WebKitHitTestResult* hit_test, gpointer) {
     Browser& b = *browser;
@@ -1687,8 +1850,8 @@ gboolean on_context_menu(WebKitWebView*, WebKitContextMenu* menu, GdkEvent*,
     bool editable = hit_test && webkit_hit_test_result_context_is_editable(hit_test) != FALSE;
     bool selection = hit_test && webkit_hit_test_result_context_is_selection(hit_test) != FALSE;
     Tab* active = active_tab(b);
-    bool can_back = active && webkit_web_view_can_go_back(active->view()) != FALSE;
-    bool can_forward = active && webkit_web_view_can_go_forward(active->view()) != FALSE;
+    bool can_back = active && !active->discarded && webkit_web_view_can_go_back(active->view()) != FALSE;
+    bool can_forward = active && !active->discarded && webkit_web_view_can_go_forward(active->view()) != FALSE;
     auto add_action = [&menu](WebKitContextMenuAction action, bool enabled) {
         if (!enabled) return;
         webkit_context_menu_append(menu, webkit_context_menu_item_new_from_stock_action(action));
@@ -1727,6 +1890,12 @@ gboolean on_context_menu(WebKitWebView*, WebKitContextMenu* menu, GdkEvent*,
     } else if (selection) {
         add_action(WEBKIT_CONTEXT_MENU_ACTION_COPY, true);
     }
+    add_separator();
+    GSimpleAction* save_action = g_simple_action_new("mustela-save-page-mhtml", nullptr);
+    g_signal_connect(save_action, "activate", G_CALLBACK(on_save_page_action), nullptr);
+    webkit_context_menu_append(menu, webkit_context_menu_item_new_from_gaction(G_ACTION(save_action),
+        "Save page as MHTML", nullptr));
+    g_object_unref(save_action);
     return FALSE;
 }
 
@@ -1839,6 +2008,7 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     tab->default_ua = default_ua ? default_ua : "";
     g_free(default_ua);
     apply_view_policy(b, view, url ? url : "", tab);
+    tab->last_active_ms = mustela::Stopwatch::now_ms();
     tab->set_label(build_tab_label(b, tab));
     b.tabs.emplace_back(tab);
 
@@ -2312,9 +2482,9 @@ void toggle_bookmark(Browser& b) {
 }
 
 void show_devtools(Browser& b) {
-    Tab* tab = active_tab(b);
-    if (!tab) return;
-    WebKitWebInspector* inspector = webkit_web_view_get_inspector(tab->view());
+    WebKitWebView* view = active_view(b);
+    if (!view) return;
+    WebKitWebInspector* inspector = webkit_web_view_get_inspector(view);
     if (!inspector) return;
     if (webkit_web_inspector_is_attached(inspector)) {
         webkit_web_inspector_close(inspector);

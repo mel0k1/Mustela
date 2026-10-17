@@ -23,6 +23,7 @@
 #include "blocklist.hpp"
 #include "bookmarks.hpp"
 #include "config.hpp"
+#include "discard.hpp"
 #include "doh.hpp"
 #include "error_page.hpp"
 #include "fingerprint.hpp"
@@ -1486,6 +1487,106 @@ void test_bookmarks_store() {
     CHECK(roundtrip.entries()[0].added_at == 500);
 }
 
+void test_discard_policy() {
+    CHECK(mustela::memory_action_from("warn") == mustela::MemoryAction::Warn);
+    CHECK(mustela::memory_action_from("discard") == mustela::MemoryAction::Discard);
+    CHECK(mustela::memory_action_from("aggressive") == mustela::MemoryAction::Warn);
+    CHECK_STR(mustela::memory_action_name(mustela::MemoryAction::Warn), "warn");
+    CHECK_STR(mustela::memory_action_name(mustela::MemoryAction::Discard), "discard");
+
+    using mustela::DiscardPolicy;
+    using mustela::DiscardableTab;
+
+    DiscardableTab tab_a;
+    tab_a.id = 0;
+    tab_a.active = true;
+    tab_a.idle_ms = 999999;
+    DiscardableTab tab_b;
+    tab_b.id = 1;
+    tab_b.idle_ms = 10000;
+    DiscardableTab tab_c;
+    tab_c.id = 2;
+    tab_c.idle_ms = 900000;
+    DiscardableTab tab_d;
+    tab_d.id = 3;
+    tab_d.idle_ms = 500000;
+    tab_d.loading = true;
+    DiscardableTab tab_e;
+    tab_e.id = 4;
+    tab_e.idle_ms = 800000;
+    tab_e.discarded = true;
+    std::vector<DiscardableTab> tabs = {tab_a, tab_b, tab_c, tab_d, tab_e};
+
+    DiscardPolicy policy;
+    policy.action = mustela::MemoryAction::Warn;
+    policy.ceiling_mb = 1;
+    policy.total_bytes = 1 << 30;
+    CHECK(mustela::pick_discard_candidates(tabs, policy).empty());
+
+    policy.action = mustela::MemoryAction::Discard;
+    std::vector<std::size_t> picked = mustela::pick_discard_candidates(tabs, policy);
+    CHECK(picked.size() == 1);
+    CHECK(picked[0] == 2);
+
+    policy.ceiling_mb = 4096;
+    CHECK(!mustela::ceiling_exceeded(policy.ceiling_mb, policy.total_bytes));
+    CHECK(mustela::pick_discard_candidates(tabs, policy).empty());
+
+    policy.ceiling_mb = 256;
+    CHECK(mustela::ceiling_exceeded(policy.ceiling_mb, policy.total_bytes));
+    picked = mustela::pick_discard_candidates(tabs, policy);
+    CHECK(picked.size() == 1);
+    CHECK(picked[0] == 2);
+
+    DiscardableTab tab_f;
+    tab_f.id = 5;
+    tab_f.idle_ms = 700000;
+    tabs.push_back(tab_f);
+    CHECK(mustela::alive_tab_count(tabs) == 5);
+
+    policy.max_per_pass = 3;
+    picked = mustela::pick_discard_candidates(tabs, policy);
+    CHECK(picked.size() == 2);
+    CHECK(picked[0] == 2);
+    CHECK(picked[1] == 5);
+    bool loading_excluded = true;
+    for (std::size_t id : picked) {
+        if (id == 3) loading_excluded = false;
+    }
+    CHECK(loading_excluded);
+
+    policy.max_per_pass = 10;
+    picked = mustela::pick_discard_candidates(tabs, policy);
+    CHECK(picked.size() == 2);
+
+    policy.min_alive = 6;
+    CHECK(mustela::pick_discard_candidates(tabs, policy).empty());
+    policy.min_alive = 1;
+
+    policy.min_idle_ms = 950000.0;
+    CHECK(mustela::pick_discard_candidates(tabs, policy).empty());
+    policy.min_idle_ms = 600000.0;
+
+    std::vector<DiscardableTab> only_active = {tab_a};
+    CHECK(mustela::pick_discard_candidates(only_active, policy).empty());
+
+    policy.max_per_pass = 1;
+    std::vector<DiscardableTab> two_alive = {tab_a, tab_c};
+    picked = mustela::pick_discard_candidates(two_alive, policy);
+    CHECK(picked.size() == 1);
+    CHECK(picked[0] == 2);
+
+    policy.min_alive = 0;
+    picked = mustela::pick_discard_candidates(two_alive, policy);
+    CHECK(picked.size() == 1);
+    CHECK(picked[0] == 2);
+
+    std::vector<DiscardableTab> single = {tab_c};
+    picked = mustela::pick_discard_candidates(single, policy);
+    CHECK(picked.size() == 1);
+    CHECK(picked[0] == 2);
+}
+
 void test_error_page() {
     std::string page = mustela::branded_error_page("Could not connect", "host not found",
         "https://ok.example/path?a=1&b=<2>");
@@ -1922,6 +2023,7 @@ int main() {
     test_doh_resolver();
     test_proxy_server_loopback();
     test_bookmarks_store();
+    test_discard_policy();
     test_error_page();
     test_site_rules_extras();
     test_profile_handle();

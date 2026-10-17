@@ -96,6 +96,7 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | perf.process_model | per-view | `per-view` (one web process per view, upstream default) or `shared` (a single shared web process — lower memory, weaker site isolation, applies at startup) |
 | perf.startup_budget_ms | 0 | startup budget; `0` disables the check, otherwise the shell flashes `startup Nms over budget` when the time to first mapped window exceeds it |
 | perf.memory_ceiling_mb | 0 | process-tree RSS ceiling; `0` disables monitoring, otherwise the status bar shows `mem N MB` while the ceiling is exceeded |
+| perf.memory_action | warn | what happens when the ceiling is exceeded: `warn` (status-bar indicator only) or `discard` — the least-recently-active, non-loading background tab idle for 10+ minutes is unloaded (view destroyed, session state kept) and rebuilt with its history when reactivated; at most one tab per pass, the active tab is never discarded |
 | perf.log | true | append startup, page-load and memory samples to `perf.jsonl` in the profile directory |
 
 Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead. The compiled remote-font filter is cached under the same profile in `filters/`, and performance samples are appended to `perf.jsonl` there.
