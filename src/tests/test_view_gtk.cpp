@@ -79,7 +79,7 @@ int main() {
     mustela::View view(session, false, callbacks);
     view.load_url("data:text/html,<html><head><title>kiwi-smoke</title></head><body>hello</body></html>");
 
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (std::chrono::steady_clock::now() < deadline) {
         while (gtk_events_pending()) gtk_main_iteration();
         if (!title_got.empty() && committed_fired) break;
@@ -135,7 +135,7 @@ int main() {
     bool find_found = false;
     callbacks.find_result = [&find_result_seen, &find_found](bool found) {
         find_result_seen = true;
-        if (found) find_found = true;
+        find_found = found;
     };
     view.set_callbacks(callbacks);
     view.find("hello");
@@ -177,14 +177,14 @@ int main() {
     gtk_container_add(GTK_CONTAINER(host_window), static_cast<GtkWidget*>(view.native_widget()));
     gtk_widget_show_all(host_window);
     view.show_devtools();
-    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (!view.devtools_attached() && std::chrono::steady_clock::now() < deadline) {
         while (gtk_events_pending()) gtk_main_iteration();
         g_usleep(4000);
     }
     check("devtools docks", view.devtools_attached());
     view.hide_devtools();
-    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (view.devtools_attached() && std::chrono::steady_clock::now() < deadline) {
         while (gtk_events_pending()) gtk_main_iteration();
         g_usleep(4000);

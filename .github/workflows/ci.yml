@@ -31,6 +31,14 @@ jobs:
       - name: Test
         run: xvfb-run -a env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 ctest --test-dir build --output-on-failure
 
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-${{ github.sha }}
+          path: build/Testing/
+          if-no-files-found: ignore
+
       - name: Page-load bench
         run: xvfb-run -a env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 ./build/mustela-bench --url "file://${{ github.workspace }}/tests/fixtures/bench.html" --runs 5 --max-ms 10000
 

@@ -408,6 +408,9 @@ struct ViewImpl {
     bool error_page = false;
     std::string error_page_uri;
     int crashes = 0;
+    bool devtools_wanted = false;
+    int devtools_attempts = 0;
+    guint devtools_retry_id = 0;
 
     ViewImpl(ViewState* s, bool priv, const ViewCallbacks& cb)
         : state(s), callbacks(cb), private_mode(priv) {}
@@ -444,8 +447,12 @@ struct ViewImpl {
         WebKitHitTestResult* hit_test, gpointer user_data);
     static void on_find_found(WebKitFindController* finder, gpointer user_data);
     static void on_find_failed(WebKitFindController* finder, gpointer user_data);
-    static void on_inspector_dock(WebKitWebInspector* inspector, gpointer user_data);
-    static void on_inspector_undock(WebKitWebInspector* inspector, gpointer user_data);
+    static gboolean on_inspector_dock(WebKitWebInspector* inspector, gpointer user_data);
+    static gboolean on_inspector_detach(WebKitWebInspector* inspector, gpointer user_data);
+    static void on_inspector_closed(WebKitWebInspector* inspector, gpointer user_data);
+    static gboolean on_devtools_attach_retry(gpointer user_data);
+    void start_devtools_attach_retry();
+    void stop_devtools_attach_retry();
 };
 
 std::string ViewImpl::current_uri() const {
@@ -488,13 +495,14 @@ void ViewImpl::attach() {
     g_signal_connect(finder, "failed-to-find-text", G_CALLBACK(on_find_failed), this);
     WebKitWebInspector* inspector = webkit_web_view_get_inspector(web);
     g_signal_connect(inspector, "attach", G_CALLBACK(on_inspector_dock), this);
-    g_signal_connect(inspector, "detach", G_CALLBACK(on_inspector_undock), this);
-    g_signal_connect(inspector, "closed", G_CALLBACK(on_inspector_undock), this);
+    g_signal_connect(inspector, "detach", G_CALLBACK(on_inspector_detach), this);
+    g_signal_connect(inspector, "closed", G_CALLBACK(on_inspector_closed), this);
     if (state) state->views.push_back(this);
     wired = true;
 }
 
 ViewImpl::~ViewImpl() {
+    stop_devtools_attach_retry();
     if (state) {
         for (size_t i = 0; i < state->views.size(); ++i) {
             if (state->views[i] == this) {
@@ -892,14 +900,53 @@ void ViewImpl::on_find_failed(WebKitFindController*, gpointer user_data) {
     if (self && self->callbacks.find_result) self->callbacks.find_result(false);
 }
 
-void ViewImpl::on_inspector_dock(WebKitWebInspector*, gpointer user_data) {
+gboolean ViewImpl::on_inspector_dock(WebKitWebInspector*, gpointer user_data) {
     ViewImpl* self = static_cast<ViewImpl*>(user_data);
     if (self && self->callbacks.devtools_docked) self->callbacks.devtools_docked(true);
+    return FALSE;
 }
 
-void ViewImpl::on_inspector_undock(WebKitWebInspector*, gpointer user_data) {
+gboolean ViewImpl::on_inspector_detach(WebKitWebInspector*, gpointer user_data) {
     ViewImpl* self = static_cast<ViewImpl*>(user_data);
     if (self && self->callbacks.devtools_docked) self->callbacks.devtools_docked(false);
+    return FALSE;
+}
+
+void ViewImpl::on_inspector_closed(WebKitWebInspector*, gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (self && self->callbacks.devtools_docked) self->callbacks.devtools_docked(false);
+}
+
+gboolean ViewImpl::on_devtools_attach_retry(gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (!self || !self->web) {
+        if (self) self->devtools_retry_id = 0;
+        return FALSE;
+    }
+    WebKitWebInspector* inspector = webkit_web_view_get_inspector(self->web);
+    if (webkit_web_inspector_is_attached(inspector)) {
+        self->devtools_retry_id = 0;
+        return FALSE;
+    }
+    webkit_web_inspector_attach(inspector);
+    if (webkit_web_inspector_is_attached(inspector) || ++self->devtools_attempts > 200) {
+        self->devtools_retry_id = 0;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+void ViewImpl::start_devtools_attach_retry() {
+    stop_devtools_attach_retry();
+    devtools_attempts = 0;
+    devtools_retry_id = g_timeout_add(100, on_devtools_attach_retry, this);
+}
+
+void ViewImpl::stop_devtools_attach_retry() {
+    if (devtools_retry_id) {
+        g_source_remove(devtools_retry_id);
+        devtools_retry_id = 0;
+    }
 }
 
 void ViewState::refresh_view_policies() {
@@ -1242,13 +1289,16 @@ void View::show_devtools() {
     if (!impl->web) return;
     WebKitSettings* settings = webkit_web_view_get_settings(impl->web);
     webkit_settings_set_enable_developer_extras(settings, TRUE);
+    impl->devtools_wanted = true;
     WebKitWebInspector* inspector = webkit_web_view_get_inspector(impl->web);
-    webkit_web_inspector_attach(inspector);
     webkit_web_inspector_show(inspector);
+    if (!webkit_web_inspector_is_attached(inspector)) impl->start_devtools_attach_retry();
 }
 
 void View::hide_devtools() {
     if (!impl->web) return;
+    impl->devtools_wanted = false;
+    impl->stop_devtools_attach_retry();
     WebKitWebInspector* inspector = webkit_web_view_get_inspector(impl->web);
     webkit_web_inspector_close(inspector);
     WebKitSettings* settings = webkit_web_view_get_settings(impl->web);
