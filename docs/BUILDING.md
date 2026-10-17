@@ -272,6 +272,15 @@ cmake --build build --config Release
 
 The SDK directory is expected to have `include/WebKit/*.h` (the C API headers from the WebKit source tree: `Source/WebKit/UIProcess/API/C`, `Source/WebKit/UIProcess/API/C/win`, `Source/WebKit/Shared/API/c`) and `lib/` with the WebKit import libraries (`WebKit`, `WebCore`, `WTF`, `JavaScriptCore`, `PAL`). At runtime the WebKit DLLs, helper processes and the WinCairo dependency DLLs (from `WinCairoRequirements`) must sit next to `mustela.exe`.
 
+### Running without building WebKit from source
+
+The headers pin (93 files) covers compilation; execution needs the WebKit binaries themselves. Upstream publishes both pieces and `scripts/fetch-win-runtime.ps1` assembles them into one `runtime\bin64` directory:
+
+1. `WebKitRequirementsWin64.zip` — the third-party dependency DLLs from the [WebKitForWindows/WebKitRequirements](https://github.com/WebKitForWindows/WebKitRequirements/releases) releases (the script takes the latest release by default, or a pinned tag via `-RequirementsTag`).
+2. The WebKit build archive — the zip attached to a green Buildbot build of `Windows-64-bit-Release-Build` (formerly `WinCairo-64-bit-Release-Build`): the script walks the buildbot API, takes the latest green build (or `-BuildNumber`), and pulls the archive URL from the upload step.
+
+Both archives' `bin64` payloads merge into `runtime\bin64` (WebKit.dll, helper processes, MiniBrowser.exe as a smoke check, ICU/libcurl/sqlite and friends). Point PATH at the folder or copy the DLLs next to `mustela.exe` / `mustela-bench-win.exe`, and install `vc_redist.x64.exe` once. The pin is the pair (requirements release, builder + build number), not a single URL — record both when a specific build needs reproducing. CI still compiles-only: GitHub Windows runners do not execute the runtime, so `mustela-bench-win` runs stay manual (the script is exactly what a self-hosted runner or a future release-bundle job would call).
+
 CI compiles `shell_win.cpp` against 86 pinned upstream headers on every push (job `windows shell`), so the Windows sources are never farther than one commit from reality. The header set is listed in `scripts/win-headers.txt` and fetched by `scripts/fetch-win-headers.ps1`.
 
 Profile data on Windows lives under `%APPDATA%\mustela`: `settings.toml` and `sites.toml` at the root, `profiles\default\` for cookies, cache, storage, the compiled font filter and `perf.jsonl`. Both TOML files are watched with `ReadDirectoryChangesW` — edits apply live, same as on Linux. The perf module works identically on both ports: startup is measured to first paint (`WM_PAINT`), memory is sampled from the process tree via `GetProcessMemoryInfo`, and page loads are timed between the provisional-start and finish navigation callbacks.

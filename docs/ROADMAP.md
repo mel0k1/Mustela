@@ -188,6 +188,12 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 - Smoke coverage extended: fullscreen enter/leave and notification callbacks fire from signal emission, the save round-trip writes a non-empty MHTML container (`MIME-Version`/`multipart/related` markers), `suggested_save_name` covers title, extension-skip, host and page fallbacks; API version check asserts ≥ 4.
 - Honest limits: MHTML is save-only (WebKitGTK has no public MHTML load path), captures the current DOM without scripts — a snapshot, not a live page; notifications still require the permission flow (`permissions.notifications` + per-site rule) before `show-notification` fires; Windows has no view library yet, so none of the three surfaces exist over the WinCairo C API (fullscreen and notifications have no production C API client there, MHTML has no save call).
 
+## M14 — Windows runtime story (planned)
+
+- The decisive lever: a **Windows view library** (`src/view/win/view_win.cpp`) implementing `include/mustela/view.hpp` over the pinned WinCairo C API — the same split as the GTK port, reusing the shell's embedding patterns (clients, data stores, find/downloads/permission plumbing). Without it Kiwi stays GTK-only and "cross-platform" stops at the harness. Honest surface parity applies: fullscreen and notifications have no production C API client in the pin, MHTML has no save call — the V4 view callbacks stay GTK-only until upstream grows the surfaces.
+- A **Windows release bundle**: a tag-triggered job that runs `scripts/fetch-win-runtime.ps1` (pinned WebKitRequirements release + pinned green `Windows-64-bit-Release-Build` build number), merges `bin64`, drops `mustela.exe` in, and attaches an experimental zip to the Release — with the runtime pair (requirements tag, build number) recorded in the release notes. Execution-verified on a self-hosted runner or a manual pass first; GitHub runners only compile.
+- The runtime pin (WebKit 8ece203 headers + requirements release + buildbot build number) becomes a three-way lock recorded in `docs/` when the bundle ships.
+
 ## Kiwi — product browser
 
 - The product browser lives in the separate [Kiwi](https://github.com/mel0k1/Kiwi) repository; mustela-shell stays the engine's test harness.

@@ -85,7 +85,7 @@ Leftovers from M4 plus what the bench variant opened up.
 
 - ~~The memory ceiling only warns. There is no tab discarding or per-view suspend; WebKitGTK and the WinCairo C API expose no per-view suspend today. Possible core-side mitigation: track per-tab idle/load state and close the oldest inactive tab above the ceiling, behind a `perf.memory_action` switch.~~ — done in M13: a core policy (`discard.hpp`) picks the least-recently-active, non-loading, 10+-minutes-idle background tab when the ceiling is exceeded and `perf.memory_action = "discard"`; both ports destroy the view (session state captured first), keep the tab in the strip and rebuild it with its history on reactivation. Per-view suspend remains impossible upstream — discard is destroy-and-recreate. (core + ports)
 - `perf.process_model` is applied at startup only. A settings change requires a restart; hot-reload does not re-apply it. (ports)
-- Bench coverage. `mustela-bench` runs in CI; `mustela-bench-win` compiles in CI but cannot run — GitHub Windows runners have no WinCairo runtime DLLs. Options: a release job that downloads a WinCairo runtime build, or a self-hosted Windows runner. Until then Windows numbers come from manual runs.
+- Bench coverage. `mustela-bench` runs in CI; `mustela-bench-win` compiles in CI but cannot run — GitHub Windows runners have no WinCairo runtime DLLs. `scripts/fetch-win-runtime.ps1` now assembles a runnable runtime from the two upstream channels (WebKitRequirementsWin64.zip + the Buildbot archive of `Windows-64-bit-Release-Build`), so manual runs and a self-hosted runner are one script away; a release bundle job would call the same script.
 - Startup budget has no cold/warm distinction; first run after install (profile creation, filter compilation) is measured against the same number as a warm start. (core)
 - `perf_check.py` compares medians only, with tolerance plus slack; no trend tracking, no per-run scatter. Fine for now, revisit when baselines accumulate. (tooling)
 
@@ -147,7 +147,7 @@ Leftovers from M4 plus what the bench variant opened up.
 
 ## Build and CI gaps
 
-- ~~No release job.~~ — done in M12 for Linux: a tag-triggered release job builds the full GTK tree, runs ctest, packages a deb (shlib-deps generated) and a tarball through CPack and attaches them to the GitHub Release; the Windows bundle (exe + WebKit DLLs) stays unbundled until a WinCairo runtime source is pinned — the release notes say so explicitly.
+- ~~No release job.~~ — done in M12 for Linux: a tag-triggered release job builds the full GTK tree, runs ctest, packages a deb (shlib-deps generated) and a tarball through CPack and attaches them to the GitHub Release; the Windows bundle (exe + WebKit DLLs) stays unbundled until a WinCairo runtime source is pinned — the release notes say so explicitly. The runtime side is now scripted (`scripts/fetch-win-runtime.ps1`); the bundle job itself is the M14 deliverable together with the Windows view library.
 - ~~No sanitizer runs.~~ — done in M12: the core test suite runs under ASan + UBSan (strict, leak detection on) in its own CI track; clang-tidy runs as an advisory track (findings reported, not enforced) until they are burned down.
 - The Windows header pin (WebKit 8ece203, 93 headers) floats conceptually over an unpinned runtime; a Windows release must pin both. The Linux release is not affected (distro WebKitGTK).
 - MinGW is a verified local toolchain (win32-thread variant; posix threads conflict with `WKBaseWin.h`'s `pid_t`) but CI uses MSVC only. Fine while MSVC is the supported Windows compiler.
