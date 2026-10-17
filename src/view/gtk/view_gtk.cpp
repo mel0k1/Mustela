@@ -5,6 +5,7 @@
 #include <glib/gstdio.h>
 #include <cairo/cairo.h>
 
+#include <algorithm>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -864,6 +865,152 @@ void ViewSession::refresh() {
     impl->refresh_view_policies();
 }
 
+namespace {
+
+WebKitWebsiteDataTypes webkit_types_from_kind(DataKind kinds) {
+    std::uint32_t out = 0;
+    if (has(kinds, DataKind::Cookies)) out |= WEBKIT_WEBSITE_DATA_COOKIES;
+    if (has(kinds, DataKind::Cache))
+        out |= WEBKIT_WEBSITE_DATA_MEMORY_CACHE | WEBKIT_WEBSITE_DATA_DISK_CACHE;
+    if (has(kinds, DataKind::LocalStorage)) out |= WEBKIT_WEBSITE_DATA_LOCAL_STORAGE;
+    if (has(kinds, DataKind::IndexedDB)) out |= WEBKIT_WEBSITE_DATA_INDEXEDDB_DATABASES;
+    return static_cast<WebKitWebsiteDataTypes>(out);
+}
+
+DataKind data_kind_from_webkit(WebKitWebsiteDataTypes types) {
+    std::uint32_t out = 0;
+    if (types & WEBKIT_WEBSITE_DATA_COOKIES) out |= static_cast<std::uint32_t>(DataKind::Cookies);
+    if ((types & WEBKIT_WEBSITE_DATA_MEMORY_CACHE) || (types & WEBKIT_WEBSITE_DATA_DISK_CACHE))
+        out |= static_cast<std::uint32_t>(DataKind::Cache);
+    if (types & WEBKIT_WEBSITE_DATA_LOCAL_STORAGE) out |= static_cast<std::uint32_t>(DataKind::LocalStorage);
+    if (types & WEBKIT_WEBSITE_DATA_INDEXEDDB_DATABASES) out |= static_cast<std::uint32_t>(DataKind::IndexedDB);
+    return static_cast<DataKind>(out);
+}
+
+struct FetchCtx {
+    WebsiteDataCallback done;
+};
+
+void on_fetch_done(GObject* object, GAsyncResult* result, gpointer user_data) {
+    std::unique_ptr<FetchCtx> ctx(static_cast<FetchCtx*>(user_data));
+    std::vector<WebsiteDataEntry> entries;
+    GError* error = nullptr;
+    GList* items = webkit_website_data_manager_fetch_finish(WEBKIT_WEBSITE_DATA_MANAGER(object),
+        result, &error);
+    if (error) {
+        g_error_free(error);
+    } else if (items) {
+        for (GList* it = items; it; it = it->next) {
+            WebKitWebsiteData* data = static_cast<WebKitWebsiteData*>(it->data);
+            WebsiteDataEntry entry;
+            const char* name = data ? webkit_website_data_get_name(data) : nullptr;
+            entry.origin = name ? std::string(name) : std::string();
+            entry.kinds = data ? data_kind_from_webkit(webkit_website_data_get_types(data))
+                               : DataKind::None;
+            if (!entry.origin.empty()) entries.push_back(std::move(entry));
+        }
+        g_list_free_full(items, reinterpret_cast<GDestroyNotify>(webkit_website_data_unref));
+    }
+    if (ctx->done) ctx->done(std::move(entries));
+}
+
+struct RemoveCtx {
+    std::vector<std::string> origins;
+    SimpleCallback done;
+    WebKitWebsiteDataTypes types = static_cast<WebKitWebsiteDataTypes>(0);
+    GList* matched = nullptr;
+};
+
+void on_remove_fetch(GObject* object, GAsyncResult* result, gpointer user_data) {
+    std::unique_ptr<RemoveCtx> ctx(static_cast<RemoveCtx*>(user_data));
+    WebKitWebsiteDataManager* manager = WEBKIT_WEBSITE_DATA_MANAGER(object);
+    GError* error = nullptr;
+    GList* items = webkit_website_data_manager_fetch_finish(manager, result, &error);
+    if (error) {
+        g_error_free(error);
+    } else {
+        for (GList* it = items; it; it = it->next) {
+            WebKitWebsiteData* data = static_cast<WebKitWebsiteData*>(it->data);
+            if (!data) continue;
+            const char* name = webkit_website_data_get_name(data);
+            bool wanted = name && std::find(ctx->origins.begin(), ctx->origins.end(),
+                std::string(name)) != ctx->origins.end();
+            if (wanted && (webkit_website_data_get_types(data) & ctx->types)) {
+                webkit_website_data_ref(data);
+                ctx->matched = g_list_prepend(ctx->matched, data);
+            }
+        }
+        g_list_free_full(items, reinterpret_cast<GDestroyNotify>(webkit_website_data_unref));
+    }
+    if (!ctx->matched) {
+        if (ctx->done) ctx->done();
+        return;
+    }
+    webkit_website_data_manager_remove(manager, ctx->types, ctx->matched, nullptr,
+        [](GObject* object, GAsyncResult* result, gpointer user_data) {
+            std::unique_ptr<RemoveCtx> ctx(static_cast<RemoveCtx*>(user_data));
+            GError* error = nullptr;
+            webkit_website_data_manager_remove_finish(WEBKIT_WEBSITE_DATA_MANAGER(object),
+                result, &error);
+            if (error) g_error_free(error);
+            g_list_free_full(ctx->matched,
+                reinterpret_cast<GDestroyNotify>(webkit_website_data_unref));
+            ctx->matched = nullptr;
+            if (ctx->done) ctx->done();
+        }, ctx.release());
+}
+
+struct ClearCtx {
+    SimpleCallback done;
+};
+
+void on_clear_done(GObject* object, GAsyncResult* result, gpointer user_data) {
+    std::unique_ptr<ClearCtx> ctx(static_cast<ClearCtx*>(user_data));
+    GError* error = nullptr;
+    webkit_website_data_manager_clear_finish(WEBKIT_WEBSITE_DATA_MANAGER(object), result, &error);
+    if (error) g_error_free(error);
+    if (ctx->done) ctx->done();
+}
+
+}  // namespace
+
+void ViewSession::fetch_website_data(const WebsiteDataCallback& done) {
+    if (!done) return;
+    WebKitWebsiteDataManager* manager = impl->normal_context
+        ? webkit_web_context_get_website_data_manager(impl->normal_context) : nullptr;
+    if (!manager) return;
+    FetchCtx* ctx = new FetchCtx{done};
+    webkit_website_data_manager_fetch(manager, WEBKIT_WEBSITE_DATA_ALL, nullptr,
+        on_fetch_done, ctx);
+}
+
+void ViewSession::remove_website_data(const std::vector<std::string>& origins, DataKind kinds,
+                                      SimpleCallback done) {
+    WebKitWebsiteDataManager* manager = impl->normal_context
+        ? webkit_web_context_get_website_data_manager(impl->normal_context) : nullptr;
+    if (!manager) {
+        if (done) done();
+        return;
+    }
+    RemoveCtx* ctx = new RemoveCtx{origins, std::move(done), webkit_types_from_kind(kinds), nullptr};
+    webkit_website_data_manager_fetch(manager, ctx->types, nullptr, on_remove_fetch, ctx);
+}
+
+void ViewSession::clear_website_data(DataKind kinds, std::int64_t max_age_seconds,
+                                     SimpleCallback done) {
+    WebKitWebsiteDataManager* manager = impl->normal_context
+        ? webkit_web_context_get_website_data_manager(impl->normal_context) : nullptr;
+    if (!manager) {
+        if (done) done();
+        return;
+    }
+    GTimeSpan span = max_age_seconds > 0
+        ? static_cast<GTimeSpan>(max_age_seconds) * G_TIME_SPAN_SECOND : 0;
+    ClearCtx* ctx = new ClearCtx{std::move(done)};
+    webkit_website_data_manager_clear(manager, webkit_types_from_kind(kinds), span, nullptr,
+        on_clear_done, ctx);
+}
+
 View::View(ViewSession& session, bool private_mode, const ViewCallbacks& callbacks)
     : impl(new ViewImpl(session.impl.get(), private_mode, callbacks)) {
     impl->owner = this;
@@ -945,6 +1092,12 @@ void View::set_callbacks(const ViewCallbacks& callbacks) {
 
 void View::refresh_policy() {
     impl->apply_policies(impl->current_uri());
+}
+
+SitePolicy View::active_site_policy() const {
+    const SiteRules* sites = impl->state->config.sites;
+    if (!sites) return SitePolicy{};
+    return sites->policy_for(host_from_uri(impl->current_uri()));
 }
 
 double zoom_step(double current, int direction) {

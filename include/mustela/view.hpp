@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 
+#include "mustela/browsing_data.hpp"
 #include "mustela/privacy.hpp"
 #include "mustela/profile.hpp"
 #include "mustela/settings.hpp"
@@ -12,7 +13,7 @@
 
 namespace mustela {
 
-constexpr int MUSTELA_VIEW_API_VERSION = 1;
+constexpr int MUSTELA_VIEW_API_VERSION = 2;
 
 inline int view_api_version() { return MUSTELA_VIEW_API_VERSION; }
 
@@ -26,6 +27,14 @@ struct ViewConfig {
 };
 
 enum class PermissionAnswer { Allow, Deny, Always, Never };
+
+struct WebsiteDataEntry {
+    std::string origin;
+    DataKind kinds = DataKind::None;
+};
+
+using WebsiteDataCallback = std::function<void(std::vector<WebsiteDataEntry>)>;
+using SimpleCallback = std::function<void()>;
 
 struct SessionCallbacks {
     std::function<std::string(const std::string& suggested_name)> download_destination;
@@ -73,6 +82,12 @@ public:
 
     void refresh();
 
+    void fetch_website_data(const WebsiteDataCallback& done);
+    void remove_website_data(const std::vector<std::string>& origins, DataKind kinds,
+                             SimpleCallback done = {});
+    void clear_website_data(DataKind kinds, std::int64_t max_age_seconds,
+                            SimpleCallback done = {});
+
 private:
     std::unique_ptr<ViewState> impl;
     friend struct ViewState;
@@ -108,6 +123,7 @@ public:
     void set_user_agent(const std::string& user_agent);
 
     void refresh_policy();
+    SitePolicy active_site_policy() const;
     void set_callbacks(const ViewCallbacks& callbacks);
 
 private:

@@ -100,6 +100,35 @@ int main() {
     view.set_zoom(1.5);
     check("zoom applies", view.zoom() > 1.49 && view.zoom() < 1.51);
     check("api version", mustela::view_api_version() == mustela::MUSTELA_VIEW_API_VERSION);
+    check("view api v2", mustela::view_api_version() >= 2);
+
+    bool fetch_fired = false;
+    session.fetch_website_data([&fetch_fired](std::vector<mustela::WebsiteDataEntry>) {
+        fetch_fired = true;
+    });
+    bool clear_fired = false;
+    session.clear_website_data(mustela::DataKind::All, 0, [&clear_fired] { clear_fired = true; });
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while ((!fetch_fired || !clear_fired) && std::chrono::steady_clock::now() < deadline) {
+        while (gtk_events_pending()) gtk_main_iteration();
+        g_usleep(4000);
+    }
+    check("website data fetch fires", fetch_fired);
+    check("website data clear fires", clear_fired);
+
+    bool removed_fired = false;
+    session.remove_website_data({"example.com"}, mustela::DataKind::Cookies,
+        [&removed_fired] { removed_fired = true; });
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!removed_fired && std::chrono::steady_clock::now() < deadline) {
+        while (gtk_events_pending()) gtk_main_iteration();
+        g_usleep(4000);
+    }
+    check("website data remove fires", removed_fired);
+
+    mustela::SitePolicy active = view.active_site_policy();
+    check("active policy default", active.zoom == 0.0 && active.user_agent.empty()
+        && active.css.empty());
 
     mustela::View private_view(session, true, mustela::ViewCallbacks{});
     check("private flag", private_view.is_private());
