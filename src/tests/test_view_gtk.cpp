@@ -175,6 +175,70 @@ int main() {
     view.execute_edit_command(mustela::EditCommand::Copy);
     check("edit command dispatch", true);
 
+    check("save name from title", mustela::suggested_save_name("My Page", "https://example.org/x")
+        == "My Page.mhtml");
+    check("save name skips extension", mustela::suggested_save_name("My Page.mhtml", "")
+        == "My Page.mhtml");
+    check("save name falls back to host", mustela::suggested_save_name("", "https://example.org/x")
+        == "example.org.mhtml");
+    check("save name falls back to page", mustela::suggested_save_name("", "")
+        == "page.mhtml");
+
+    bool enter_seen = false;
+    bool leave_seen = false;
+    callbacks.enter_fullscreen = [&enter_seen] { enter_seen = true; };
+    callbacks.leave_fullscreen = [&leave_seen] { leave_seen = true; };
+    std::string note_title;
+    std::string note_body;
+    bool note_seen = false;
+    callbacks.notification = [&](const std::string& title, const std::string& body) {
+        note_seen = true;
+        note_title = title;
+        note_body = body;
+    };
+    view.set_callbacks(callbacks);
+    gboolean enter_handled = FALSE;
+    g_signal_emit_by_name(view.native_widget(), "enter-fullscreen", &enter_handled);
+    gboolean leave_handled = FALSE;
+    g_signal_emit_by_name(view.native_widget(), "leave-fullscreen", &leave_handled);
+    gboolean note_handled = FALSE;
+    g_signal_emit_by_name(view.native_widget(), "show-notification",
+        static_cast<WebKitNotification*>(nullptr), &note_handled);
+    while (gtk_events_pending()) gtk_main_iteration();
+    check("fullscreen enter callback", enter_seen);
+    check("fullscreen leave callback", leave_seen);
+    check("notification callback", note_seen && note_title.empty() && note_body.empty());
+    check("fullscreen signals pass through", enter_handled == FALSE && leave_handled == FALSE);
+    check("notification signal consumed", note_handled == TRUE);
+
+    std::string mhtml_path = root + "/smoke-page.mhtml";
+    g_remove(mhtml_path.c_str());
+    bool save_fired = false;
+    bool save_ok = false;
+    view.save_mhtml(mhtml_path, [&](bool ok) {
+        save_fired = true;
+        save_ok = ok;
+    });
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (!save_fired && std::chrono::steady_clock::now() < deadline) {
+        while (gtk_events_pending()) gtk_main_iteration();
+        g_usleep(4000);
+    }
+    check("mhtml save fires", save_fired);
+    check("mhtml save succeeded", save_ok);
+    goffset mhtml_size = 0;
+    char* mhtml_contents = nullptr;
+    if (save_ok) {
+        g_file_get_contents(mhtml_path.c_str(), &mhtml_contents, nullptr, nullptr);
+        if (mhtml_contents) mhtml_size = static_cast<goffset>(std::strlen(mhtml_contents));
+    }
+    check("mhtml file non-empty", mhtml_size > 0);
+    check("mhtml looks like mhtml", mhtml_contents
+        && (std::strstr(mhtml_contents, "MIME-Version") != nullptr
+            || std::strstr(mhtml_contents, "multipart/related") != nullptr));
+    if (mhtml_contents) g_free(mhtml_contents);
+    g_remove(mhtml_path.c_str());
+
     GtkWidget* host_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_default_size(GTK_WINDOW(host_window), 1280, 800);
     gtk_container_add(GTK_CONTAINER(host_window), static_cast<GtkWidget*>(view.native_widget()));
@@ -220,70 +284,6 @@ int main() {
     g_object_unref(menu);
     g_object_unref(hit);
     gtk_widget_destroy(host_window);
-
-    check("save name from title", mustela::suggested_save_name("My Page", "https://example.org/x")
-        == "My Page.mhtml");
-    check("save name skips extension", mustela::suggested_save_name("My Page.mhtml", "")
-        == "My Page.mhtml");
-    check("save name falls back to host", mustela::suggested_save_name("", "https://example.org/x")
-        == "example.org.mhtml");
-    check("save name falls back to page", mustela::suggested_save_name("", "")
-        == "page.mhtml");
-
-    bool enter_seen = false;
-    bool leave_seen = false;
-    callbacks.enter_fullscreen = [&enter_seen] { enter_seen = true; };
-    callbacks.leave_fullscreen = [&leave_seen] { leave_seen = true; };
-    std::string note_title;
-    std::string note_body;
-    bool note_seen = false;
-    callbacks.notification = [&](const std::string& title, const std::string& body) {
-        note_seen = true;
-        note_title = title;
-        note_body = body;
-    };
-    view.set_callbacks(callbacks);
-    gboolean enter_handled = FALSE;
-    g_signal_emit_by_name(view.native_widget(), "enter-fullscreen", &enter_handled);
-    gboolean leave_handled = FALSE;
-    g_signal_emit_by_name(view.native_widget(), "leave-fullscreen", &leave_handled);
-    gboolean note_handled = FALSE;
-    g_signal_emit_by_name(view.native_widget(), "show-notification",
-        static_cast<WebKitNotification*>(nullptr), &note_handled);
-    while (gtk_events_pending()) gtk_main_iteration();
-    check("fullscreen enter callback", enter_seen);
-    check("fullscreen leave callback", leave_seen);
-    check("notification callback", note_seen && note_title.empty() && note_body.empty());
-    check("signals consumed", enter_handled == TRUE && leave_handled == TRUE
-        && note_handled == TRUE);
-
-    std::string mhtml_path = root + "/smoke-page.mhtml";
-    g_remove(mhtml_path.c_str());
-    bool save_fired = false;
-    bool save_ok = false;
-    view.save_mhtml(mhtml_path, [&](bool ok) {
-        save_fired = true;
-        save_ok = ok;
-    });
-    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-    while (!save_fired && std::chrono::steady_clock::now() < deadline) {
-        while (gtk_events_pending()) gtk_main_iteration();
-        g_usleep(4000);
-    }
-    check("mhtml save fires", save_fired);
-    check("mhtml save succeeded", save_ok);
-    goffset mhtml_size = 0;
-    char* mhtml_contents = nullptr;
-    if (save_ok) {
-        g_file_get_contents(mhtml_path.c_str(), &mhtml_contents, nullptr, nullptr);
-        if (mhtml_contents) mhtml_size = static_cast<goffset>(std::strlen(mhtml_contents));
-    }
-    check("mhtml file non-empty", mhtml_size > 0);
-    check("mhtml looks like mhtml", mhtml_contents
-        && (std::strstr(mhtml_contents, "MIME-Version") != nullptr
-            || std::strstr(mhtml_contents, "multipart/related") != nullptr));
-    if (mhtml_contents) g_free(mhtml_contents);
-    g_remove(mhtml_path.c_str());
 
     mustela::View private_view(session, true, mustela::ViewCallbacks{});
     check("private flag", private_view.is_private());
