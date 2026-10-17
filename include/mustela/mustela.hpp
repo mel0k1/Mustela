@@ -12,5 +12,6 @@
 #include "search.hpp"
 #include "settings.hpp"
 #include "site_rules.hpp"
+#include "ui_text.hpp"
 #include "url.hpp"
 #include "version.hpp"
