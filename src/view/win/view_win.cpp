@@ -1107,15 +1107,16 @@ struct ClearJoin {
 void clear_store_part(WKWebsiteDataStoreRef store, bool cookies, bool storage,
     const std::shared_ptr<ClearJoin>& join) {
     if (!store) return;
+    int steps = (cookies ? 1 : 0) + (storage ? 1 : 0);
+    if (!steps) return;
+    join->pending += steps;
     if (cookies) {
-        join->pending++;
         WKHTTPCookieStoreRef cookie_store = WKWebsiteDataStoreGetHTTPCookieStore(store);
         WKHTTPCookieStoreDeleteAllCookies(cookie_store, join.get(), [](void* context) {
             static_cast<ClearJoin*>(context)->finish_one();
         });
     }
     if (storage) {
-        join->pending++;
         WKWebsiteDataStoreClearStorage(store, join.get(), [](void* context) {
             static_cast<ClearJoin*>(context)->finish_one();
         });
