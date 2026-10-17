@@ -258,6 +258,8 @@ Settings load_settings(const std::string& path, SettingsReport& report) {
     apply(pairs, "security.tls_strict", settings.tls_strict, &report);
     apply(pairs, "shell.session_restore", settings.session_restore, &report);
     apply(pairs, "shell.devtools", settings.devtools, &report);
+    apply(pairs, "shell.spellcheck", settings.spellcheck, &report);
+    apply(pairs, "shell.spellcheck_languages", settings.spellcheck_languages, &report);
     apply(pairs, "privacy.gpc", settings.gpc, &report);
     apply(pairs, "privacy.blocklist", settings.blocklist, &report);
     apply(pairs, "privacy.blocklist_file", settings.blocklist_file, &report);
@@ -286,6 +288,8 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "zoom = " << clamp_zoom(settings.zoom_default) << "\n";
     out << "session_restore = " << (settings.session_restore ? "true" : "false") << "\n";
     out << "devtools = " << (settings.devtools ? "true" : "false") << "\n";
+    out << "spellcheck = " << (settings.spellcheck ? "true" : "false") << "\n";
+    out << "spellcheck_languages = \"" << settings.spellcheck_languages << "\"\n";
     out << "\n[privacy]\n";
     out << "private_tabs_enabled = " << (settings.private_tabs_enabled ? "true" : "false") << "\n";
     out << "start_in_private = " << (settings.start_in_private ? "true" : "false") << "\n";

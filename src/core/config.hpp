@@ -50,6 +50,8 @@ struct Settings {
     bool tls_strict = true;
     bool session_restore = true;
     bool devtools = true;
+    bool spellcheck = true;
+    std::string spellcheck_languages;
     bool gpc = true;
     bool blocklist = true;
     std::string blocklist_file;

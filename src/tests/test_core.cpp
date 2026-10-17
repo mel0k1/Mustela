@@ -111,6 +111,8 @@ void test_settings_roundtrip() {
     original.tls_strict = false;
     original.session_restore = false;
     original.devtools = false;
+    original.spellcheck = false;
+    original.spellcheck_languages = "en_US,ru_RU";
     original.gpc = false;
     original.blocklist = false;
     original.blocklist_file = "/tmp/trackers.list";
@@ -150,6 +152,8 @@ void test_settings_roundtrip() {
     CHECK(!loaded.tls_strict);
     CHECK(!loaded.session_restore);
     CHECK(!loaded.devtools);
+    CHECK(!loaded.spellcheck);
+    CHECK_STR(loaded.spellcheck_languages, "en_US,ru_RU");
     CHECK(!loaded.gpc);
     CHECK(!loaded.blocklist);
     CHECK_STR(loaded.blocklist_file, "/tmp/trackers.list");
@@ -162,6 +166,8 @@ void test_settings_roundtrip() {
     CHECK(!fallback.fingerprint_webgl);
     CHECK_STR(fallback.fingerprint_referrer, "same-origin");
     CHECK_STR(fallback.process_model, "per-view");
+    CHECK(fallback.spellcheck);
+    CHECK(fallback.spellcheck_languages.empty());
     CHECK(fallback.startup_budget_ms == 0);
     CHECK(fallback.memory_ceiling_mb == 0);
     CHECK(fallback.perf_log);
@@ -191,6 +197,8 @@ void test_settings_partial_file() {
         "# comment\n"
         "[shell]\n"
         "homepage = \"https://partial.example\"\n"
+        "spellcheck = yes\n"
+        "spellcheck_languages = \"en_US, ru_RU\"\n"
         "window_width = 800  # trailing comment\n"
         "window_height = not-a-number\n"
         "[privacy]\n"
@@ -198,6 +206,8 @@ void test_settings_partial_file() {
         "javascript = off\n");
     mustela::Settings loaded = mustela::load_settings(path);
     CHECK_STR(loaded.homepage, "https://partial.example");
+    CHECK(loaded.spellcheck);
+    CHECK_STR(loaded.spellcheck_languages, "en_US, ru_RU");
     CHECK(loaded.window_width == 800);
     CHECK(loaded.window_height == 800);
     CHECK(loaded.cookie_policy == "always");

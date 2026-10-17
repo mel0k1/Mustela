@@ -119,6 +119,8 @@ void show_devtools(Browser& b);
 void open_site_rules_window(Browser& b);
 void clear_browsing_data(Browser& b);
 void apply_policies_to_tabs(Browser& b);
+void apply_spell_checking(Browser& b);
+void save_page_as(Browser& b);
 void apply_fingerprint(Browser& b, WebKitWebView* view, const FingerprintPolicy& fp);
 void refresh_status(Browser& b);
 void flash_status(const char* text);
@@ -436,6 +438,33 @@ void apply_cookie_policy(WebKitWebContext* context, CookiePolicy policy) {
     if (policy == CookiePolicy::Always) accept = WEBKIT_COOKIE_POLICY_ACCEPT_ALWAYS;
     if (policy == CookiePolicy::Never) accept = WEBKIT_COOKIE_POLICY_ACCEPT_NEVER;
     webkit_cookie_manager_set_accept_policy(manager, accept);
+}
+
+void apply_spell_checking(Browser& b) {
+    if (!b.normal_context || !b.private_context) return;
+    if (!b.settings.spellcheck) {
+        webkit_web_context_set_spell_checking_enabled(b.normal_context, FALSE);
+        webkit_web_context_set_spell_checking_enabled(b.private_context, FALSE);
+        return;
+    }
+    std::vector<std::string> kept;
+    std::stringstream langs(b.settings.spellcheck_languages);
+    std::string part;
+    while (std::getline(langs, part, ',')) {
+        size_t begin = part.find_first_not_of(" \t");
+        if (begin == std::string::npos) continue;
+        size_t end = part.find_last_not_of(" \t");
+        kept.push_back(part.substr(begin, end - begin + 1));
+    }
+    if (!kept.empty()) {
+        std::vector<const char*> tags;
+        for (const std::string& tag : kept) tags.push_back(tag.c_str());
+        tags.push_back(nullptr);
+        webkit_web_context_set_spell_checking_languages(b.normal_context, tags.data());
+        webkit_web_context_set_spell_checking_languages(b.private_context, tags.data());
+    }
+    webkit_web_context_set_spell_checking_enabled(b.normal_context, TRUE);
+    webkit_web_context_set_spell_checking_enabled(b.private_context, TRUE);
 }
 
 void harden_view(Browser& b, WebKitWebView* view) {
@@ -799,6 +828,55 @@ void take_screenshot(Browser& b) {
         nullptr, reinterpret_cast<GAsyncReadyCallback>(on_snapshot_ready), nullptr);
 }
 
+void on_page_saved(WebKitWebView* view, GAsyncResult* result, gpointer user_data) {
+    GFile* file = G_FILE(user_data);
+    GError* error = nullptr;
+    gboolean ok = webkit_web_view_save_to_file_finish(view, result, &error);
+    if (!ok) {
+        if (error) g_error_free(error);
+        flash_status("save page failed");
+    } else {
+        gchar* name = g_file_get_basename(file);
+        flash_status(("page saved: " + std::string(name ? name : "")).c_str());
+        g_free(name);
+    }
+    g_object_unref(file);
+}
+
+std::string save_page_name(Browser& b) {
+    Tab* tab = active_tab(b);
+    std::string name;
+    if (tab) name = mustela::sanitize_filename(tab->title(), 96);
+    if (name.empty() && tab) name = mustela::sanitize_filename(mustela::host_from_uri(tab->uri()), 96);
+    if (name.empty()) name = "page";
+    bool has_ext = (name.size() >= 6 && name.compare(name.size() - 6, 6, ".mhtml") == 0)
+        || (name.size() >= 4 && name.compare(name.size() - 4, 4, ".mht") == 0);
+    return has_ext ? name : name + ".mhtml";
+}
+
+void save_page_as(Browser& b) {
+    Tab* tab = active_tab(b);
+    if (!tab) return;
+    GtkFileChooserNative* native = gtk_file_chooser_native_new("Save page as", GTK_WINDOW(b.window),
+        GTK_FILE_CHOOSER_ACTION_SAVE, "_Save", "_Cancel");
+    GtkFileChooser* chooser = GTK_FILE_CHOOSER(native);
+    gtk_file_chooser_set_do_overwrite_confirmation(chooser, TRUE);
+    gtk_file_chooser_set_current_folder(chooser, download_directory(b).c_str());
+    gtk_file_chooser_set_current_name(chooser, save_page_name(b).c_str());
+    GtkFileFilter* filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "Web page (MHTML)");
+    gtk_file_filter_add_mime_type(filter, "multipart/related");
+    gtk_file_filter_add_pattern(filter, "*.mhtml");
+    gtk_file_filter_add_pattern(filter, "*.mht");
+    gtk_file_chooser_add_filter(chooser, filter);
+    gint response = gtk_native_dialog_run(GTK_NATIVE_DIALOG(native));
+    GFile* file = response == GTK_RESPONSE_ACCEPT ? gtk_file_chooser_get_file(chooser) : nullptr;
+    g_object_unref(native);
+    if (!file) return;
+    webkit_web_view_save_to_file(tab->view(), file, WEBKIT_SAVE_MODE_MHTML, nullptr,
+        reinterpret_cast<GAsyncReadyCallback>(on_page_saved), file);
+}
+
 gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
     Browser& b = *browser;
     GdkModifierType mods = static_cast<GdkModifierType>(event->state & gtk_accelerator_get_default_mod_mask());
@@ -842,6 +920,10 @@ gboolean on_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
     }
     if (mods == (GDK_CONTROL_MASK | GDK_MOD1_MASK) && event->keyval == GDK_KEY_s) {
         take_screenshot(b);
+        return TRUE;
+    }
+    if (mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_s) {
+        save_page_as(b);
         return TRUE;
     }
     if (mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && event->keyval == GDK_KEY_O) {
@@ -2050,6 +2132,7 @@ gboolean do_settings_reload(gpointer) {
     webkit_website_data_manager_set_itp_enabled(manager, b.privacy.hardening.tracking_prevention ? TRUE : FALSE);
     apply_tls_policy(b);
     apply_proxy(b);
+    apply_spell_checking(b);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(b.private_toggle), b.privacy.default_private == TabPrivacy::Private);
 
     if (b.privacy.history_enabled && !b.history) {
@@ -2179,6 +2262,7 @@ int mustela_main(int argc, char** argv) {
     apply_process_model(browser->private_context, browser->settings.process_model);
     apply_cookie_policy(browser->normal_context, browser->privacy.cookies);
     apply_cookie_policy(browser->private_context, browser->privacy.cookies);
+    apply_spell_checking(*browser);
     apply_tls_policy(*browser);
     apply_proxy(*browser);
     webkit_web_context_set_web_extensions_directory(browser->normal_context, MUSTELA_WEBEXT_DIR);
