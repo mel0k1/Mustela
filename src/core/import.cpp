@@ -8,10 +8,6 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#include <shlobj.h>
-#endif
-
 namespace fs = std::filesystem;
 
 namespace mustela {
@@ -515,10 +511,31 @@ std::int64_t firefox_time_to_unix(std::int64_t value) {
 }
 
 std::vector<DetectedProfile> detect_browsers() {
+    std::vector<DetectedProfile> found;
 #ifdef _WIN32
-    char local[MAX_PATH] = {};
-    if (!SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local))) return {};
-    return detect_browsers_in(std::string(local));
+    const char* local = std::getenv("LOCALAPPDATA");
+    if (!local || !*local) return found;
+    std::string base = local;
+    auto scan_chromium_windows = [&](const char* browser, const std::string& dir) {
+        if (!is_dir(dir)) return;
+        for (const std::string& name : subdirectory_names(dir)) {
+            std::string profile_dir = dir + "\\" + name;
+            if (!is_file(profile_dir + "\\Bookmarks")) continue;
+            DetectedProfile item;
+            item.browser = browser;
+            item.profile = name;
+            item.path = profile_dir;
+            item.has_bookmarks = true;
+            found.push_back(std::move(item));
+        }
+    };
+    scan_chromium_windows("Chrome", base + "\\Google\\Chrome\\User Data");
+    scan_chromium_windows("Edge", base + "\\Microsoft\\Edge\\User Data");
+    scan_chromium_windows("Brave", base + "\\BraveSoftware\\Brave-Browser");
+    scan_chromium_windows("Vivaldi", base + "\\Vivaldi\\User Data");
+    scan_chromium_windows("Chromium", base + "\\Chromium\\User Data");
+    scan_chromium_windows("Opera", base + "\\Opera Software\\Opera Stable");
+    return found;
 #else
     const char* home = std::getenv("HOME");
     return detect_browsers_in(home && *home ? std::string(home) : std::string("."));
@@ -540,19 +557,6 @@ std::vector<DetectedProfile> detect_browsers_in(const std::string& home) {
             found.push_back(std::move(item));
         }
     };
-#ifdef _WIN32
-    (void)home;
-    char local[MAX_PATH] = {};
-    if (!SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local))) return found;
-    std::string base = local;
-    scan_chromium("Chrome", base + "\\Google\\Chrome\\User Data");
-    scan_chromium("Edge", base + "\\Microsoft\\Edge\\User Data");
-    scan_chromium("Brave", base + "\\BraveSoftware\\Brave-Browser");
-    scan_chromium("Vivaldi", base + "\\Vivaldi\\User Data");
-    scan_chromium("Chromium", base + "\\Chromium\\User Data");
-    scan_chromium("Opera", base + "\\Opera Software\\Opera Stable");
-#else
-    (void)home;
     scan_chromium("Chrome", home + "/.config/google-chrome");
     scan_chromium("Chromium", home + "/.config/chromium");
     scan_chromium("Edge", home + "/.config/microsoft-edge");
@@ -573,7 +577,6 @@ std::vector<DetectedProfile> detect_browsers_in(const std::string& home) {
             found.push_back(std::move(item));
         }
     }
-#endif
     return found;
 }
 
