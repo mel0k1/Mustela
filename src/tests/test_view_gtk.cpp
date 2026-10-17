@@ -174,8 +174,14 @@ int main() {
     check("edit command dispatch", true);
 
     GtkWidget* host_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_default_size(GTK_WINDOW(host_window), 1280, 800);
     gtk_container_add(GTK_CONTAINER(host_window), static_cast<GtkWidget*>(view.native_widget()));
     gtk_widget_show_all(host_window);
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        while (gtk_events_pending()) gtk_main_iteration();
+        g_usleep(16000);
+    }
     view.show_devtools();
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (!view.devtools_attached() && std::chrono::steady_clock::now() < deadline) {
