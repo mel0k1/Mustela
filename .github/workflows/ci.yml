@@ -143,5 +143,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "Mustela $GITHUB_REF_NAME" \
             --generate-notes \
-            build/mustela-*.deb \
-            build/mustela-*.tar.gz
+            build/*.deb \
+            build/*.tar.gz
