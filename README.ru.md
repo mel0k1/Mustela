@@ -4,7 +4,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-20-00599C)
-![status](https://img.shields.io/badge/status-M5_browsing-basics-e0a03d)
+![status](https://img.shields.io/badge/status-M10_platform_dressing-e0a03d)
 
 Приватный кроссплатформенный браузерный движок на базе WebKit.
 
@@ -19,6 +19,8 @@ English version: [README.md](README.md)
 - **Скорость.** Тонкий эмбеддер над WebKit: без вшитых сервисов, фонового трафика и лишней стоимости запуска.
 
 ## Статус
+
+`v0.14.0` закрывает M10 — вторую порцию «обмундирования» платформы: веб-уведомления показываются на GTK — сигнал `show-notification` рендерится через `GNotification` на зарегистрированном `GApplication` (заголовок и текст проходят санитайзер диалогов, разрешение по-прежнему решает политика M5); Ctrl+P открывает системный диалог печати через `WebKitPrintOperation`; Ctrl+Alt+S снимает видимую часть страницы через `webkit_web_view_get_snapshot` в PNG с меткой времени в каталог загрузок; а встроенный список публичных суффиксов стал полным официальным PSL — 10 080 exact, 311 wildcard и 8 exception-правил, IDN-записи нормализованы в Punycode, обновление — через `scripts/gen_psl.py` — так что `is_public_suffix` / `registrable_domain` и гарда `sites.toml` теперь следуют спецификации буквально, включая wildcard'ы и исключения. Сьют — 532 проверки.
 
 `v0.13.0` закрывает M9 — «обмундирование» браузера: devtools открываются на Ctrl+Shift+I / F12 на обоих портах (GTK переключает WebKit-инспектор через `webkit_web_view_get_inspector` с переключателем `shell.devtools`, Windows показывает его через `WKPageGetInspector` + `WKPageShowWebInspectorForTesting`); неудачные загрузки главного фрейма рисуют брендированную страницу ошибки Mustela вместо стандартной страницы WebKit — заголовок, описание и URL приходят из ядра (`error_page.hpp`) с HTML-экранированием и кнопкой «Try again»; закладки живут в сторе ядра (`bookmarks.tsv` в профиле, `BookmarkStore`) со звездой в тулбаре (Ctrl+D) и окном закладок (Ctrl+Shift+O) на обоих портах; вкладки GTK показывают favicon'ы сайтов из базы WebKit, они сохраняются в PNG под профилем. Сьют — 513 проверок.
 

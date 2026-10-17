@@ -4,7 +4,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2f74c0)
 ![license](https://img.shields.io/badge/license-LGPL--2.1-e0a03d)
 ![language](https://img.shields.io/badge/C%2B%2B-20-00599C)
-![status](https://img.shields.io/badge/status-M9_browsing_dressing-e0a03d)
+![status](https://img.shields.io/badge/status-M10_platform_dressing-e0a03d)
 
 Privacy-first, cross-platform browser engine built on WebKit.
 
@@ -19,6 +19,8 @@ Existing engines force a trade-off between privacy, platform coverage and speed.
 - **Lean performance.** A thin embedder over WebKit: no bundled services, no background traffic, minimal startup cost.
 
 ## Status
+
+`v0.14.0` closes M10, the second round of platform dressing: web notifications display on GTK — the `show-notification` signal renders through `GNotification` on a registered `GApplication` (titles and bodies pass the dialog sanitizer, the permission gate stays the M5 policy); Ctrl+P opens the system print dialog through `WebKitPrintOperation`; Ctrl+Alt+S captures the visible page through `webkit_web_view_get_snapshot` into a timestamped PNG in the downloads directory; and the bundled public-suffix list becomes the full official PSL — 10,080 exact, 311 wildcard and 8 exception rules, IDN entries normalized to Punycode and refreshed by `scripts/gen_psl.py` — so `is_public_suffix` / `registrable_domain` and the `sites.toml` guard now follow the spec exactly, wildcards and exceptions included. The suite is now 532 checks.
 
 `v0.13.0` closes M9, the browser dressing: devtools open with Ctrl+Shift+I / F12 on both ports (GTK toggles the WebKit inspector through `webkit_web_view_get_inspector` with `shell.devtools` as the switch, Windows shows it through `WKPageGetInspector` + `WKPageShowWebInspectorForTesting`); failed main-frame loads render Mustela-branded error pages instead of WebKit's stock page — heading, detail and failing URL come from the core (`error_page.hpp`), HTML-escaped with a Try-again action; bookmarks live in a core store (`bookmarks.tsv` in the profile, `BookmarkStore`) with a toolbar star (Ctrl+D) and a bookmarks window (Ctrl+Shift+O) on both ports; GTK tabs show site favicons from the WebKit favicon database, persisted as PNGs under the profile. The suite is now 513 checks.
 

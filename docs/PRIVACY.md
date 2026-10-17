@@ -109,7 +109,7 @@ The status label shows `fp` whenever any fingerprint defense is active globally.
 
 ### Per-site overrides
 
-`~/.config/mustela/sites.toml` overrides the global policy per host. Hosts are guarded by the bundled public-suffix list: a section for a registry suffix like `[co.uk]` is skipped on load and refused on save, so one entry can never silently cover a whole registry — rules belong to registrable domains (`example.org`, `foo.co.uk`). Rule lookup climbs the host only until the effective top level, and IP addresses plus `localhost` stay addressable for local development.
+`~/.config/mustela/sites.toml` overrides the global policy per host. Hosts are guarded by the full official public-suffix list bundled in the core (10,080 exact, 311 wildcard and 8 exception rules, refreshed by `scripts/gen_psl.py`): a section for a registry suffix like `[co.uk]` is skipped on load and refused on save, so one entry can never silently cover a whole registry — rules belong to registrable domains (`example.org`, `foo.co.uk`). Rule lookup climbs the host only until the effective top level, and IP addresses plus `localhost` stay addressable for local development.
 
 ```toml
 [example.org]
@@ -143,7 +143,7 @@ History is stored by the core (`HistoryStore`) inside the default profile. Priva
 
 ### Permissions, certificates and authentication
 
-Permission requests (geolocation, camera, microphone, notifications) default to `deny` in `settings.toml` — a site that wants your location gets silence unless you flip `permissions.geolocation` (and friends) to `ask` or `allow`. The `ask` mode shows a prompt with Allow / Deny / Always allow / Never allow; the last two write a per-site `permissions` rule into `sites.toml`, which then answers future requests for that host without asking. Private tabs prompt identically but never write rules, so an ephemeral session cannot leave a permission trail. Display capture follows the camera setting on GTK; every other unrecognized permission kind (pointer lock, XR and anything new) is denied without a prompt.
+Permission requests (geolocation, camera, microphone, notifications) default to `deny` in `settings.toml` — a site that wants your location gets silence unless you flip `permissions.geolocation` (and friends) to `ask` or `allow`. The `ask` mode shows a prompt with Allow / Deny / Always allow / Never allow; the last two write a per-site `permissions` rule into `sites.toml`, which then answers future requests for that host without asking. Private tabs prompt identically but never write rules, so an ephemeral session cannot leave a permission trail. Display capture follows the camera setting on GTK; every other unrecognized permission kind (pointer lock, XR and anything new) is denied without a prompt. Allowed notifications render as desktop notifications through `GNotification` on GTK with sanitized text; Windows auto-denies notification display (no C API decision call).
 
 Invalid TLS certificates fail the load by default (`security.tls_strict`); the GTK port then offers an explicit allow-once prompt — the acceptance lives for that single load and is never stored. `security.tls_strict = false` ignores TLS errors entirely and exists for broken local networks, not as a daily-driver setting. HTTP authentication asks for user and password in a native dialog; credentials are created for the session only and are never written to disk. On Windows the C API offers no certificate-acceptance call, so strict TLS is the only mode there and server-trust auth challenges are rejected.
 

@@ -119,6 +119,15 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 - Favicons on GTK: the profile enables the WebKit favicon database (`webkit_web_context_set_favicon_database_directory`), tabs show the site icon through `notify::favicon` + `webkit_web_view_get_favicon`, and non-private tabs persist it as a PNG under `profiles/default/favicons/<host>.png`. (done, GTK-only)
 - Honest limits: the pinned WinCairo C API exposes no favicon surface, so Windows tabs and history stay text-only (tracked in [GAPS.md](GAPS.md)); on Windows the inspector is one-way (no `WKInspectorShow`/`IsVisible` in the pin); reloading an error page keeps history silent for that retry.
 
+## M10 — Platform dressing II (done)
+
+- Web notifications on GTK: the `show-notification` signal renders each notification through `GNotification` on a registered `GApplication` (`G_APPLICATION_NON_UNIQUE`, no D-Bus name ownership); titles and bodies pass `sanitize_dialog_text` before display, the permission gate stays the M5 policy (`permissions.notifications` + per-site rule), and without a session bus the registration fails quietly and notifications are dropped instead of shown. (done, GTK-only — the pinned WinCairo C API has no notification display surface)
+- Printing on GTK: Ctrl+P opens the GTK print dialog through `WebKitPrintOperation` (`webkit_print_operation_new` + `run_dialog` against the active view). (done, GTK-only)
+- Screenshots on GTK: Ctrl+Alt+S captures the visible region through `webkit_web_view_get_snapshot` and writes `mustela-screenshot-YYYYMMDD-HHMMSS.png` into the downloads directory (`downloads.dir` or the user Downloads folder), confirmed in the status bar. (done, GTK-only)
+- Full public-suffix data in the core: the compact table in `psl.cpp` is replaced by the official PSL — 10,080 exact, 311 wildcard and 8 exception rules, IDN rules converted to Punycode at generation time, version stamped as `kPslVersion` and exposed through `psl_version()`; the lookup runs binary search over the sorted tables; `scripts/gen_psl.py` regenerates `psl_data.inc` from publicsuffix.org. (done)
+- Honest limits: the real data tightened semantics — under `*.kobe.jp` + `!city.kobe.jp` the domain `city.kobe.jp` is now registrable (the compact table used to treat it as an exact suffix); save page (MHTML) and spellchecking stay GTK candidates; printing and screenshots are GTK-only (no print/snapshot surface in the pinned C API).
+- Test suite 513 → 532 checks: full-PSL behavior (private-section rules like `blogspot.com`/`cloudfront.net`, wildcard bases like `*.compute.amazonaws.com`, Japanese city exceptions, Punycode `рф`, `in-addr.arpa`, registrable-domain chains). (done)
+
 ## K1 — Kiwi browser
 
 - The product browser lives in the separate [Kiwi](https://github.com/mel0k1/Kiwi) repository; mustela-shell stays the engine's test harness.

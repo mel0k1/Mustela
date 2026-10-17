@@ -107,16 +107,21 @@ A rule for a domain covers its subdomains (`example.org` matches `www.example.or
 | Ctrl+W | close tab |
 | Ctrl+L | focus the address bar |
 | Ctrl+H | history window |
+| Ctrl+D | bookmark the current page |
+| Ctrl+Shift+O | bookmarks window |
+| Ctrl+Shift+I / F12 | toggle the Web Inspector (devtools) |
 | Ctrl+F | find in page (Enter / Shift+Enter — next / previous match, Escape closes) |
 | F11 | toggle window fullscreen (HTML5 element fullscreen follows on GTK) |
 | Ctrl+plus / Ctrl+minus / Ctrl+0 | zoom in / out / reset (30%–300%) |
 | Ctrl+Shift+Del | clear browsing data (cookies, cache, storage, IndexedDB) |
 | Ctrl+Shift+S | site rules window |
+| Ctrl+P | print the page (GTK print dialog) |
+| Ctrl+Alt+S | save a page screenshot (PNG in the downloads directory) |
 | Ctrl+R / F5 | reload |
 | Alt+Left / Alt+Right | back / forward |
 | Escape | stop loading |
 
-Linux shortcuts apply to the GTK port. The Windows port shares Ctrl+T, Ctrl+W, Ctrl+L, Ctrl+R, F5, Ctrl+H, Ctrl+F, Ctrl+Shift+Del, Alt+Left, Alt+Right and the zoom trio; Escape and Ctrl+Shift+S (site rules window) are GTK-only for now.
+Linux shortcuts apply to the GTK port. The Windows port shares Ctrl+T, Ctrl+W, Ctrl+L, Ctrl+R, F5, Ctrl+H, Ctrl+F, Ctrl+Shift+Del, Alt+Left, Alt+Right and the zoom trio; Escape, Ctrl+Shift+S (site rules window), Ctrl+Shift+O (bookmarks window), Ctrl+Shift+I / F12 (devtools), Ctrl+P (print) and Ctrl+Alt+S (screenshot) are GTK-only for now.
 
 ## Popups, dialogs, find, downloads, permissions
 
@@ -130,7 +135,7 @@ Hovering a link shows its destination in the status bar on both ports.
 
 Downloads resolve their destination from `downloads.dir` (empty = the platform Downloads folder), never overwrite — a conflicting file gets a `name (2).ext` suffix — and sanitize the suggested file name in the core (`ui_text::sanitize_filename`). `downloads.mode = "ask"` opens a save dialog per download; cancelling it cancels the download. While a download runs, the status bar shows its name and percentage.
 
-Permission requests (geolocation, camera, microphone, notifications) resolve through the core policy: the global `permissions.*` choice decides deny/prompt/allow, and a per-site `permissions` rule in `sites.toml` overrides it — `allow` grants without asking, `deny` blocks silently. A prompt offers Allow / Deny / Always allow / Never allow; the last two write the per-site rule. Unknown permission kinds are denied.
+Permission requests (geolocation, camera, microphone, notifications) resolve through the core policy: the global `permissions.*` choice decides deny/prompt/allow, and a per-site `permissions` rule in `sites.toml` overrides it — `allow` grants without asking, `deny` blocks silently. A prompt offers Allow / Deny / Always allow / Never allow; the last two write the per-site rule. Unknown permission kinds are denied. Allowed notifications render as desktop notifications through `GNotification` on GTK; the title and body shown to the user are sanitized like dialog text.
 
 Invalid TLS certificates prompt before continuing on GTK (allow once per load, strict policy by default); on Windows the C API has no certificate-acceptance call, so such loads fail. HTTP authentication prompts for user and password on both ports; credentials last for the session only.
 
@@ -144,7 +149,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-`mustela_core_tests` covers settings round-trips (including partial files and fallbacks), privacy mapping and gating invariants, `host_from_uri` parsing, site-rule suffix matching and persistence, `resolve_site` precedence, history escaping/limits/dedup, fingerprint presets and referrer substitution, browsing-data kinds, URL normalization, the perf module (statistics, record codec, log trimming, `/proc` RSS parsing, budget and ceiling verdicts) and the `ui_text` sanitization rules (control characters, CR/LF normalization, UTF-8-safe truncation for dialog text and find queries). It runs on every push in CI on both Linux and Windows.
+`mustela_core_tests` covers settings round-trips (including partial files and fallbacks), privacy mapping and gating invariants, `host_from_uri` parsing, site-rule suffix matching and persistence, `resolve_site` precedence, the full public-suffix lookup (`is_public_suffix` / `registrable_domain` over the official exact, wildcard and exception tables), history escaping/limits/dedup, fingerprint presets and referrer substitution, browsing-data kinds, URL normalization, the perf module (statistics, record codec, log trimming, `/proc` RSS parsing, budget and ceiling verdicts) and the `ui_text` sanitization rules (control characters, CR/LF normalization, UTF-8-safe truncation for dialog text and find queries). It runs on every push in CI on both Linux and Windows.
 
 ## Benchmarks
 
