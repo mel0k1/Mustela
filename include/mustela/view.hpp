@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <vector>
 #include <memory>
 #include <string>
 
@@ -13,7 +14,7 @@
 
 namespace mustela {
 
-constexpr int MUSTELA_VIEW_API_VERSION = 2;
+constexpr int MUSTELA_VIEW_API_VERSION = 3;
 
 inline int view_api_version() { return MUSTELA_VIEW_API_VERSION; }
 
@@ -35,6 +36,26 @@ struct WebsiteDataEntry {
 
 using WebsiteDataCallback = std::function<void(std::vector<WebsiteDataEntry>)>;
 using SimpleCallback = std::function<void()>;
+using TextCallback = std::function<void(const std::string&)>;
+
+struct FindOptions {
+    bool case_insensitive = true;
+    bool wrap_around = true;
+};
+
+enum class EditCommand { Copy, Cut, Paste, SelectAll, Undo, Redo };
+
+struct ContextMenuInfo {
+    bool link = false;
+    bool image = false;
+    bool media = false;
+    bool selection = false;
+    bool editable = false;
+    std::string link_uri;
+    std::string image_uri;
+    std::string media_uri;
+    std::string page_uri;
+};
 
 struct SessionCallbacks {
     std::function<std::string(const std::string& suggested_name)> download_destination;
@@ -68,6 +89,10 @@ struct ViewCallbacks {
     std::function<void(View* popup)> popup_created;
     std::function<void(View* popup)> popup_ready;
     std::function<void()> close_requested;
+
+    std::function<bool(const ContextMenuInfo& info)> context_menu;
+    std::function<void(bool found)> find_result;
+    std::function<void(bool docked)> devtools_docked;
 };
 
 struct ViewState;
@@ -125,6 +150,19 @@ public:
     void refresh_policy();
     SitePolicy active_site_policy() const;
     void set_callbacks(const ViewCallbacks& callbacks);
+
+    void find(const std::string& text, const FindOptions& options = {},
+              std::uint32_t max_matches = 999);
+    void find_next();
+    void find_previous();
+    void find_finish();
+    std::string find_text() const;
+    void selected_text(const TextCallback& done);
+    void execute_edit_command(EditCommand command);
+
+    void show_devtools();
+    void hide_devtools();
+    bool devtools_attached() const;
 
 private:
     std::unique_ptr<ViewImpl> impl;

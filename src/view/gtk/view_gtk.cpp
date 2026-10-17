@@ -1,5 +1,6 @@
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
+#include <jsc/jsc.h>
 #include <libsoup/soup.h>
 #include <gio/gio.h>
 #include <glib/gstdio.h>
@@ -439,6 +440,12 @@ struct ViewImpl {
         gpointer user_data);
     static void on_process_gone(WebKitWebView* view, WebKitWebProcessTerminationReason reason,
         gpointer user_data);
+    static gboolean on_context_menu(WebKitWebView* view, WebKitContextMenu* menu, GdkEvent* event,
+        WebKitHitTestResult* hit_test, gpointer user_data);
+    static void on_find_found(WebKitFindController* finder, gpointer user_data);
+    static void on_find_failed(WebKitFindController* finder, gpointer user_data);
+    static void on_inspector_dock(WebKitWebInspector* inspector, gpointer user_data);
+    static void on_inspector_undock(WebKitWebInspector* inspector, gpointer user_data);
 };
 
 std::string ViewImpl::current_uri() const {
@@ -475,6 +482,14 @@ void ViewImpl::attach() {
     g_signal_connect(web, "accept-certificate", G_CALLBACK(on_accept_certificate), this);
     g_signal_connect(web, "authenticate", G_CALLBACK(on_authenticate), this);
     g_signal_connect(web, "web-process-terminated", G_CALLBACK(on_process_gone), this);
+    g_signal_connect(web, "context-menu", G_CALLBACK(on_context_menu), this);
+    WebKitFindController* finder = webkit_web_view_get_find_controller(web);
+    g_signal_connect(finder, "found-text", G_CALLBACK(on_find_found), this);
+    g_signal_connect(finder, "failed-to-find-text", G_CALLBACK(on_find_failed), this);
+    WebKitWebInspector* inspector = webkit_web_view_get_inspector(web);
+    g_signal_connect(inspector, "attach", G_CALLBACK(on_inspector_dock), this);
+    g_signal_connect(inspector, "detach", G_CALLBACK(on_inspector_undock), this);
+    g_signal_connect(inspector, "closed", G_CALLBACK(on_inspector_undock), this);
     if (state) state->views.push_back(this);
     wired = true;
 }
@@ -845,6 +860,48 @@ void ViewImpl::on_process_gone(WebKitWebView*, WebKitWebProcessTerminationReason
     if (self->callbacks.web_process_gone) self->callbacks.web_process_gone(text);
 }
 
+gboolean ViewImpl::on_context_menu(WebKitWebView*, WebKitContextMenu*, GdkEvent*,
+    WebKitHitTestResult* hit_test, gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (!self || !self->callbacks.context_menu) return FALSE;
+    ContextMenuInfo info;
+    if (hit_test) {
+        info.link = webkit_hit_test_result_context_is_link(hit_test) != FALSE;
+        info.image = webkit_hit_test_result_context_is_image(hit_test) != FALSE;
+        info.media = webkit_hit_test_result_context_is_media(hit_test) != FALSE;
+        info.selection = webkit_hit_test_result_context_is_selection(hit_test) != FALSE;
+        info.editable = webkit_hit_test_result_context_is_editable(hit_test) != FALSE;
+        const gchar* link = webkit_hit_test_result_get_link_uri(hit_test);
+        const gchar* image = webkit_hit_test_result_get_image_uri(hit_test);
+        const gchar* media = webkit_hit_test_result_get_media_uri(hit_test);
+        info.link_uri = link ? link : "";
+        info.image_uri = image ? image : "";
+        info.media_uri = media ? media : "";
+    }
+    info.page_uri = self->current_uri();
+    return self->callbacks.context_menu(info) ? TRUE : FALSE;
+}
+
+void ViewImpl::on_find_found(WebKitFindController*, gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (self && self->callbacks.find_result) self->callbacks.find_result(true);
+}
+
+void ViewImpl::on_find_failed(WebKitFindController*, gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (self && self->callbacks.find_result) self->callbacks.find_result(false);
+}
+
+void ViewImpl::on_inspector_dock(WebKitWebInspector*, gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (self && self->callbacks.devtools_docked) self->callbacks.devtools_docked(true);
+}
+
+void ViewImpl::on_inspector_undock(WebKitWebInspector*, gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (self && self->callbacks.devtools_docked) self->callbacks.devtools_docked(false);
+}
+
 void ViewState::refresh_view_policies() {
     std::vector<ViewImpl*> current = views;
     for (ViewImpl* view : current) {
@@ -1098,6 +1155,109 @@ SitePolicy View::active_site_policy() const {
     const SiteRules* sites = impl->state->config.sites;
     if (!sites) return SitePolicy{};
     return sites->policy_for(host_from_uri(impl->current_uri()));
+}
+
+namespace {
+
+struct JsTextCtx {
+    TextCallback done;
+};
+
+void on_selection_value(GObject* object, GAsyncResult* result, gpointer user_data) {
+    std::unique_ptr<JsTextCtx> ctx(static_cast<JsTextCtx*>(user_data));
+    std::string text;
+    GError* error = nullptr;
+    JSCValue* value = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(object), result, &error);
+    if (error) {
+        g_error_free(error);
+    } else if (value && jsc_value_is_string(value)) {
+        gchar* raw = jsc_value_to_string(value);
+        if (raw) {
+            text = raw;
+            g_free(raw);
+        }
+    }
+    if (value) g_object_unref(value);
+    if (ctx && ctx->done) ctx->done(text);
+}
+
+}  // namespace
+
+void View::find(const std::string& text, const FindOptions& options, std::uint32_t max_matches) {
+    if (!impl->web) return;
+    WebKitFindController* finder = webkit_web_view_get_find_controller(impl->web);
+    if (text.empty()) {
+        webkit_find_controller_search_finish(finder);
+        return;
+    }
+    std::uint32_t flags = WEBKIT_FIND_OPTIONS_NONE;
+    if (options.case_insensitive) flags |= WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE;
+    if (options.wrap_around) flags |= WEBKIT_FIND_OPTIONS_WRAP_AROUND;
+    webkit_find_controller_search(finder, text.c_str(), static_cast<WebKitFindOptions>(flags),
+        max_matches ? max_matches : 999u);
+}
+
+void View::find_next() {
+    if (impl->web) webkit_find_controller_search_next(webkit_web_view_get_find_controller(impl->web));
+}
+
+void View::find_previous() {
+    if (impl->web) webkit_find_controller_search_previous(webkit_web_view_get_find_controller(impl->web));
+}
+
+void View::find_finish() {
+    if (impl->web) webkit_find_controller_search_finish(webkit_web_view_get_find_controller(impl->web));
+}
+
+std::string View::find_text() const {
+    if (!impl->web) return std::string();
+    const gchar* text = webkit_find_controller_get_search_text(
+        webkit_web_view_get_find_controller(impl->web));
+    return text ? std::string(text) : std::string();
+}
+
+void View::selected_text(const TextCallback& done) {
+    if (!impl->web || !done) return;
+    JsTextCtx* ctx = new JsTextCtx{done};
+    webkit_web_view_evaluate_javascript(impl->web,
+        "window.getSelection ? window.getSelection().toString() : ''", -1, nullptr, nullptr, nullptr,
+        on_selection_value, ctx);
+}
+
+void View::execute_edit_command(EditCommand command) {
+    if (!impl->web) return;
+    const char* name = WEBKIT_EDITING_COMMAND_COPY;
+    switch (command) {
+        case EditCommand::Cut: name = WEBKIT_EDITING_COMMAND_CUT; break;
+        case EditCommand::Paste: name = WEBKIT_EDITING_COMMAND_PASTE; break;
+        case EditCommand::SelectAll: name = WEBKIT_EDITING_COMMAND_SELECT_ALL; break;
+        case EditCommand::Undo: name = WEBKIT_EDITING_COMMAND_UNDO; break;
+        case EditCommand::Redo: name = WEBKIT_EDITING_COMMAND_REDO; break;
+        case EditCommand::Copy: break;
+    }
+    webkit_web_view_execute_editing_command(impl->web, name);
+}
+
+void View::show_devtools() {
+    if (!impl->web) return;
+    WebKitSettings* settings = webkit_web_view_get_settings(impl->web);
+    webkit_settings_set_enable_developer_extras(settings, TRUE);
+    WebKitWebInspector* inspector = webkit_web_view_get_inspector(impl->web);
+    webkit_web_inspector_attach(inspector);
+    webkit_web_inspector_show(inspector);
+}
+
+void View::hide_devtools() {
+    if (!impl->web) return;
+    WebKitWebInspector* inspector = webkit_web_view_get_inspector(impl->web);
+    webkit_web_inspector_close(inspector);
+    WebKitSettings* settings = webkit_web_view_get_settings(impl->web);
+    webkit_settings_set_enable_developer_extras(settings, FALSE);
+}
+
+bool View::devtools_attached() const {
+    if (!impl->web) return false;
+    return webkit_web_inspector_is_attached(webkit_web_view_get_inspector(impl->web)) != FALSE;
 }
 
 double zoom_step(double current, int direction) {

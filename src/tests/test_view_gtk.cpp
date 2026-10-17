@@ -1,4 +1,5 @@
 #include <gtk/gtk.h>
+#include <webkit2/webkit2.h>
 #include <glib/gstdio.h>
 
 #include <chrono>
@@ -100,7 +101,7 @@ int main() {
     view.set_zoom(1.5);
     check("zoom applies", view.zoom() > 1.49 && view.zoom() < 1.51);
     check("api version", mustela::view_api_version() == mustela::MUSTELA_VIEW_API_VERSION);
-    check("view api v2", mustela::view_api_version() >= 2);
+    check("view api v3", mustela::view_api_version() >= 3);
 
     bool fetch_fired = false;
     session.fetch_website_data([&fetch_fired](std::vector<mustela::WebsiteDataEntry>) {
@@ -129,6 +130,88 @@ int main() {
     mustela::SitePolicy active = view.active_site_policy();
     check("active policy default", active.zoom == 0.0 && active.user_agent.empty()
         && active.css.empty());
+
+    bool find_result_seen = false;
+    bool find_found = false;
+    callbacks.find_result = [&find_result_seen, &find_found](bool found) {
+        find_result_seen = true;
+        if (found) find_found = true;
+    };
+    view.set_callbacks(callbacks);
+    view.find("hello");
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!find_result_seen && std::chrono::steady_clock::now() < deadline) {
+        while (gtk_events_pending()) gtk_main_iteration();
+        g_usleep(4000);
+    }
+    check("find reports hit", find_result_seen && find_found);
+    check("find text kept", view.find_text() == "hello");
+
+    find_result_seen = false;
+    view.find("zzz-missing-token");
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!find_result_seen && std::chrono::steady_clock::now() < deadline) {
+        while (gtk_events_pending()) gtk_main_iteration();
+        g_usleep(4000);
+    }
+    check("find reports miss", find_result_seen && !find_found);
+    view.find_finish();
+
+    std::string selection;
+    bool selection_fired = false;
+    view.selected_text([&selection, &selection_fired](const std::string& text) {
+        selection_fired = true;
+        selection = text;
+    });
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!selection_fired && std::chrono::steady_clock::now() < deadline) {
+        while (gtk_events_pending()) gtk_main_iteration();
+        g_usleep(4000);
+    }
+    check("selected text fires", selection_fired);
+
+    view.execute_edit_command(mustela::EditCommand::Copy);
+    check("edit command dispatch", true);
+
+    GtkWidget* host_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_container_add(GTK_CONTAINER(host_window), static_cast<GtkWidget*>(view.native_widget()));
+    gtk_widget_show_all(host_window);
+    view.show_devtools();
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!view.devtools_attached() && std::chrono::steady_clock::now() < deadline) {
+        while (gtk_events_pending()) gtk_main_iteration();
+        g_usleep(4000);
+    }
+    check("devtools docks", view.devtools_attached());
+    view.hide_devtools();
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (view.devtools_attached() && std::chrono::steady_clock::now() < deadline) {
+        while (gtk_events_pending()) gtk_main_iteration();
+        g_usleep(4000);
+    }
+    check("devtools closes", !view.devtools_attached());
+
+    bool ctx_handled = false;
+    mustela::ContextMenuInfo ctx_info;
+    callbacks.context_menu = [&ctx_handled, &ctx_info](const mustela::ContextMenuInfo& info) {
+        ctx_handled = true;
+        ctx_info = info;
+        return true;
+    };
+    view.set_callbacks(callbacks);
+    WebKitHitTestResult* hit = WEBKIT_HIT_TEST_RESULT(g_object_new(WEBKIT_TYPE_HIT_TEST_RESULT,
+        "context", static_cast<guint>(WEBKIT_HIT_TEST_RESULT_CONTEXT_LINK
+            | WEBKIT_HIT_TEST_RESULT_CONTEXT_SELECTION),
+        "link-uri", "https://example.org/kiwi", nullptr));
+    WebKitContextMenu* menu = webkit_context_menu_new();
+    gboolean suppressed = FALSE;
+    g_signal_emit_by_name(view.native_widget(), "context-menu", menu, nullptr, hit, &suppressed);
+    check("context menu intercepted", ctx_handled && suppressed == TRUE
+        && ctx_info.link && ctx_info.link_uri == "https://example.org/kiwi");
+    check("context menu page uri", ctx_info.page_uri.rfind("data:", 0) == 0);
+    g_object_unref(menu);
+    g_object_unref(hit);
+    gtk_widget_destroy(host_window);
 
     mustela::View private_view(session, true, mustela::ViewCallbacks{});
     check("private flag", private_view.is_private());
