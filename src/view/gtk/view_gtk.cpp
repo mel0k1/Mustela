@@ -445,7 +445,7 @@ struct ViewImpl {
         gpointer user_data);
     static gboolean on_context_menu(WebKitWebView* view, WebKitContextMenu* menu, GdkEvent* event,
         WebKitHitTestResult* hit_test, gpointer user_data);
-    static void on_find_found(WebKitFindController* finder, gpointer user_data);
+    static void on_find_found(WebKitFindController* finder, guint match_count, gpointer user_data);
     static void on_find_failed(WebKitFindController* finder, gpointer user_data);
     static gboolean on_inspector_dock(WebKitWebInspector* inspector, gpointer user_data);
     static gboolean on_inspector_detach(WebKitWebInspector* inspector, gpointer user_data);
@@ -890,7 +890,7 @@ gboolean ViewImpl::on_context_menu(WebKitWebView*, WebKitContextMenu*, GdkEvent*
     return self->callbacks.context_menu(info) ? TRUE : FALSE;
 }
 
-void ViewImpl::on_find_found(WebKitFindController*, gpointer user_data) {
+void ViewImpl::on_find_found(WebKitFindController*, guint, gpointer user_data) {
     ViewImpl* self = static_cast<ViewImpl*>(user_data);
     if (self && self->callbacks.find_result) self->callbacks.find_result(true);
 }
