@@ -14,7 +14,7 @@
 
 namespace mustela {
 
-constexpr int MUSTELA_VIEW_API_VERSION = 4;
+constexpr int MUSTELA_VIEW_API_VERSION = 5;
 
 inline int view_api_version() { return MUSTELA_VIEW_API_VERSION; }
 
@@ -25,6 +25,7 @@ struct ViewConfig {
     Profile* profile = nullptr;
     std::string webext_dir;
     std::string downloads_dir;
+    void* parent_window = nullptr;
 };
 
 enum class PermissionAnswer { Allow, Deny, Always, Never };

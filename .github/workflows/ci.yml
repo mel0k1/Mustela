@@ -68,7 +68,7 @@ jobs:
         run: ctest --test-dir build --build-config Release --output-on-failure
 
   windows-shell:
-    name: windows shell against upstream webkit headers
+    name: windows shell and view against upstream webkit headers
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +81,9 @@ jobs:
 
       - name: Compile shell against upstream headers
         run: cl /nologo /c /W4 /std:c++20 /EHsc /Ibuild\sdk\include /Isrc /Isrc\core /Fobuild\shell_win.obj src\shell\win\shell_win.cpp
+
+      - name: Compile view against upstream headers
+        run: cl /nologo /c /W4 /std:c++20 /EHsc /Ibuild\sdk\include /Isrc /Isrc\core /Iinclude /Fobuild\view_win.obj src\view\win\view_win.cpp
 
       - name: Compile bench against upstream headers
         run: cl /nologo /c /W4 /std:c++20 /EHsc /Ibuild\sdk\include /Isrc /Isrc\core /Fobuild\bench_win.obj src\bench\bench_win.cpp
@@ -125,6 +128,59 @@ jobs:
 
       - name: Run clang-tidy on core
         run: clang-tidy -p build-tidy --config-file=.clang-tidy $(ls src/core/*.cpp)
+
+  windows-bundle:
+    name: windows experimental bundle
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch WebKit C API headers
+        shell: pwsh
+        run: ./scripts/fetch-win-headers.ps1 -Destination build/sdk/include
+
+      - name: Assemble WinCairo runtime
+        shell: pwsh
+        run: ./scripts/fetch-win-runtime.ps1 -Destination build/runtime
+
+      - name: Generate import libraries from runtime DLLs
+        shell: pwsh
+        run: ./scripts/make-win-import-libs.ps1 -RuntimeDir build/runtime/runtime/bin64 -OutDir build/sdk/lib
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "-DMUSTELA_WEBKIT_SDK=${{ github.workspace }}\build\sdk"
+
+      - name: Build shell and view
+        run: |
+          cmake --build build --config Release --target mustela
+          cmake --build build --config Release --target mustela_view_win
+
+      - name: Pack bundle
+        shell: pwsh
+        run: |
+          Copy-Item build/Release/mustela.exe build/runtime/runtime/bin64/mustela.exe
+          $readme = @"
+          Mustela $env:GITHUB_REF_NAME - experimental Windows bundle (WinCairo WebKit runtime)
+          Run mustela.exe from this folder. Install the Microsoft VC++ redistributable
+          (vc_redist.x64.exe) if the application reports missing runtime DLLs.
+          The WebKit DLLs come from the pinned WebKitRequirements release and the
+          green Windows-64-bit-Release-Build buildbot archive; see docs/BUILDING.md.
+          "@
+          Set-Content -Path build/runtime/runtime/bin64/README.txt -Value $readme
+          Compress-Archive -Path build/runtime/runtime/bin64 -DestinationPath mustela-${{ github.ref_name }}-windows-x64.zip
+          Get-Item mustela-${{ github.ref_name }}-windows-x64.zip | Select-Object Name, Length
+
+      - name: Upload bundle to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release upload "$env:GITHUB_REF_NAME" "mustela-$($env:GITHUB_REF_NAME)-windows-x64.zip" --clobber
 
   release:
     name: release packaging

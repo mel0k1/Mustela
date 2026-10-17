@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mustela
-    VERSION 0.23.0
+    VERSION 0.24.0
     DESCRIPTION "Privacy-first, cross-platform browser engine built on WebKit"
     LANGUAGES CXX)
 
@@ -41,6 +41,7 @@ add_library(mustela_core STATIC
     src/core/proxy_server.cpp
     src/core/session.cpp
     src/core/bookmarks.cpp
+    src/core/import.cpp
     src/core/profile.cpp
     src/core/error_page.cpp)
 target_include_directories(mustela_core PUBLIC
@@ -70,7 +71,20 @@ endif()
 
 if(MUSTELA_BUILD_VIEW)
     if(WIN32)
-        message(STATUS "mustela_view_gtk is not available on Windows yet")
+        if(MUSTELA_WEBKIT_SDK)
+            add_library(mustela_view_win STATIC src/view/win/view_win.cpp)
+            target_link_libraries(mustela_view_win PUBLIC mustela_core)
+            target_include_directories(mustela_view_win PRIVATE ${MUSTELA_WEBKIT_SDK}/include)
+            target_link_directories(mustela_view_win PRIVATE ${MUSTELA_WEBKIT_SDK}/lib)
+            target_link_libraries(mustela_view_win PRIVATE
+                WebKit WebCore WTF JavaScriptCore PAL user32 gdi32 ole32)
+            install(TARGETS mustela_view_win EXPORT mustela_targets ARCHIVE DESTINATION lib)
+            export(EXPORT mustela_targets
+                FILE "${CMAKE_BINARY_DIR}/mustela-targets.cmake"
+                NAMESPACE mustela::)
+        else()
+            message(STATUS "mustela_view_win needs MUSTELA_WEBKIT_SDK (WebKit C API headers and import libraries)")
+        endif()
     else()
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(WEBKIT REQUIRED webkit2gtk-4.1)
