@@ -14,7 +14,7 @@
 
 namespace mustela {
 
-constexpr int MUSTELA_VIEW_API_VERSION = 3;
+constexpr int MUSTELA_VIEW_API_VERSION = 4;
 
 inline int view_api_version() { return MUSTELA_VIEW_API_VERSION; }
 
@@ -37,6 +37,7 @@ struct WebsiteDataEntry {
 using WebsiteDataCallback = std::function<void(std::vector<WebsiteDataEntry>)>;
 using SimpleCallback = std::function<void()>;
 using TextCallback = std::function<void(const std::string&)>;
+using SaveCallback = std::function<void(bool ok)>;
 
 struct FindOptions {
     bool case_insensitive = true;
@@ -93,6 +94,10 @@ struct ViewCallbacks {
     std::function<bool(const ContextMenuInfo& info)> context_menu;
     std::function<void(bool found)> find_result;
     std::function<void(bool docked)> devtools_docked;
+
+    std::function<void()> enter_fullscreen;
+    std::function<void()> leave_fullscreen;
+    std::function<void(const std::string& title, const std::string& body)> notification;
 };
 
 struct ViewState;
@@ -164,6 +169,8 @@ public:
     void hide_devtools();
     bool devtools_attached() const;
 
+    void save_mhtml(const std::string& path, SaveCallback done = {});
+
 private:
     std::unique_ptr<ViewImpl> impl;
     explicit View(ViewImpl* adopted);
@@ -171,5 +178,7 @@ private:
 };
 
 double zoom_step(double current, int direction);
+
+std::string suggested_save_name(const std::string& title, const std::string& uri);
 
 }

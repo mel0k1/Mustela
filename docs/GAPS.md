@@ -63,6 +63,7 @@ These are the capabilities a browser-shaped consumer (Kiwi) will need first. Pop
 | Web process crash | ~~GTK `web-process-terminated`; Win `webProcessDidTerminate`~~ — done in M5 | Two guarded auto-reloads, reason in the status bar |
 | Session restore | ~~(core) session file + GTK `WebKitWebViewSessionState` + Win back/forward URLs~~ — done in M6 | Tabs reopen after a restart; GTK restores full back/forward history, Windows restores tab URLs (no C API session-state restore); private tabs never saved |
 | Status link preview | ~~GTK `mouse-target-changed`; Win `mouseDidMoveOverElement`/`setStatusText`~~ — done in M5 | Hover URL in the status bar on both ports |
+| View: fullscreen requests | ~~GTK `enter-fullscreen`/`leave-fullscreen`~~ — done in V4 (view API) | The view surface forwards element fullscreen requests to the embedder; the harness fullscreens its window, Kiwi does the same; WinCairo C API has no client (F11 only) |
 
 ## Privacy engine gaps (priority 2)
 

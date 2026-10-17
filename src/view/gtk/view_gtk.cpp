@@ -453,6 +453,10 @@ struct ViewImpl {
     static gboolean on_devtools_attach_retry(gpointer user_data);
     void start_devtools_attach_retry();
     void stop_devtools_attach_retry();
+    static gboolean on_enter_fullscreen(WebKitWebView* view, gpointer user_data);
+    static gboolean on_leave_fullscreen(WebKitWebView* view, gpointer user_data);
+    static gboolean on_show_notification(WebKitWebView* view, WebKitNotification* notification,
+        gpointer user_data);
 };
 
 std::string ViewImpl::current_uri() const {
@@ -497,6 +501,9 @@ void ViewImpl::attach() {
     g_signal_connect(inspector, "attach", G_CALLBACK(on_inspector_dock), this);
     g_signal_connect(inspector, "detach", G_CALLBACK(on_inspector_detach), this);
     g_signal_connect(inspector, "closed", G_CALLBACK(on_inspector_closed), this);
+    g_signal_connect(web, "enter-fullscreen", G_CALLBACK(on_enter_fullscreen), this);
+    g_signal_connect(web, "leave-fullscreen", G_CALLBACK(on_leave_fullscreen), this);
+    g_signal_connect(web, "show-notification", G_CALLBACK(on_show_notification), this);
     if (state) state->views.push_back(this);
     wired = true;
 }
@@ -917,6 +924,30 @@ void ViewImpl::on_inspector_closed(WebKitWebInspector*, gpointer user_data) {
     if (self && self->callbacks.devtools_docked) self->callbacks.devtools_docked(false);
 }
 
+gboolean ViewImpl::on_enter_fullscreen(WebKitWebView*, gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (self && self->callbacks.enter_fullscreen) self->callbacks.enter_fullscreen();
+    return FALSE;
+}
+
+gboolean ViewImpl::on_leave_fullscreen(WebKitWebView*, gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (self && self->callbacks.leave_fullscreen) self->callbacks.leave_fullscreen();
+    return FALSE;
+}
+
+gboolean ViewImpl::on_show_notification(WebKitWebView*, WebKitNotification* notification,
+    gpointer user_data) {
+    ViewImpl* self = static_cast<ViewImpl*>(user_data);
+    if (!self || !self->callbacks.notification) return FALSE;
+    const gchar* raw_title = notification ? webkit_notification_get_title(notification) : nullptr;
+    const gchar* raw_body = notification ? webkit_notification_get_body(notification) : nullptr;
+    std::string title = sanitize_dialog_text(raw_title ? raw_title : "", 256);
+    std::string body = sanitize_dialog_text(raw_body ? raw_body : "", 512);
+    self->callbacks.notification(title, body);
+    return TRUE;
+}
+
 gboolean ViewImpl::on_devtools_attach_retry(gpointer user_data) {
     ViewImpl* self = static_cast<ViewImpl*>(user_data);
     if (!self || !self->web) {
@@ -1308,6 +1339,47 @@ void View::hide_devtools() {
 bool View::devtools_attached() const {
     if (!impl->web) return false;
     return webkit_web_inspector_is_attached(webkit_web_view_get_inspector(impl->web)) != FALSE;
+}
+
+namespace {
+
+struct SaveCtx {
+    SaveCallback done;
+};
+
+void on_save_to_file_done(GObject* object, GAsyncResult* result, gpointer user_data) {
+    std::unique_ptr<SaveCtx> ctx(static_cast<SaveCtx*>(user_data));
+    GError* error = nullptr;
+    bool ok = webkit_web_view_save_to_file_finish(WEBKIT_WEB_VIEW(object), result, &error) != FALSE;
+    if (error) g_error_free(error);
+    if (ctx && ctx->done) ctx->done(ok);
+}
+
+}  // namespace
+
+void View::save_mhtml(const std::string& path, SaveCallback done) {
+    if (!impl->web || path.empty()) {
+        if (done) done(false);
+        return;
+    }
+    GFile* file = g_file_new_for_path(path.c_str());
+    if (!file) {
+        if (done) done(false);
+        return;
+    }
+    SaveCtx* ctx = new SaveCtx{std::move(done)};
+    webkit_web_view_save_to_file(impl->web, file, WEBKIT_SAVE_MODE_MHTML, nullptr,
+        on_save_to_file_done, ctx);
+    g_object_unref(file);
+}
+
+std::string suggested_save_name(const std::string& title, const std::string& uri) {
+    std::string base = sanitize_filename(title, 96);
+    if (base.empty() || base == "download") base = sanitize_filename(host_from_uri(uri), 96);
+    if (base.empty() || base == "download") base = "page";
+    bool has_ext = (base.size() >= 6 && base.compare(base.size() - 6, 6, ".mhtml") == 0)
+        || (base.size() >= 4 && base.compare(base.size() - 4, 4, ".mht") == 0);
+    return has_ext ? base : base + ".mhtml";
 }
 
 double zoom_step(double current, int direction) {
