@@ -28,7 +28,7 @@
 #   * unzip both, merge their bin64 folders, put the DLLs next to the executable.
 param(
     [string] $Destination = ".\webkit-runtime",
-    [string] $RequirementsTag = "",   # empty = latest WebKitForWindows release
+    [string] $RequirementsTag = "v2025.04.02",   # pinned by default; empty = latest via the GitHub API
     [string] $Builder = "Windows-64-bit-Release-Build",
     [int] $BuildNumber = 0            # 0 = latest green build
 )
