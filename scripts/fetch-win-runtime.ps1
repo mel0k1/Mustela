@@ -37,7 +37,9 @@ $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function New-TempDir {
-    return Join-Path ([IO.Path]::GetTempPath()) ("webkit-runtime-" + [Guid]::NewGuid().ToString("N"))
+    $path = Join-Path ([IO.Path]::GetTempPath()) ("webkit-runtime-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $path | Out-Null
+    return $path
 }
 
 function Get-LatestRequirementsAssetUrl {
