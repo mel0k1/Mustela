@@ -45,7 +45,8 @@ add_library(mustela_core STATIC
 target_include_directories(mustela_core PUBLIC src src/core include)
 target_link_libraries(mustela_core PUBLIC mustela_warnings)
 
-install(TARGETS mustela_core ARCHIVE DESTINATION lib)
+install(TARGETS mustela_core EXPORT mustela_targets ARCHIVE DESTINATION lib)
+install(TARGETS mustela_warnings EXPORT mustela_targets)
 install(DIRECTORY include/mustela DESTINATION include)
 if(WIN32)
     target_link_libraries(mustela_core PUBLIC ws2_32)
@@ -78,7 +79,10 @@ if(MUSTELA_BUILD_VIEW)
         endif()
         target_compile_definitions(mustela_view_gtk PRIVATE
             MUSTELA_WEBEXT_DIR="${MUSTELA_WEBEXT_DIR}")
-        install(TARGETS mustela_view_gtk ARCHIVE DESTINATION lib)
+        install(TARGETS mustela_view_gtk EXPORT mustela_targets ARCHIVE DESTINATION lib)
+        export(EXPORT mustela_targets
+            FILE "${CMAKE_BINARY_DIR}/mustela-targets.cmake"
+            NAMESPACE mustela::)
         if(MUSTELA_BUILD_TESTS)
             add_executable(mustela_view_smoke src/tests/test_view_gtk.cpp)
             target_link_libraries(mustela_view_smoke PRIVATE mustela_view_gtk)
@@ -158,6 +162,11 @@ if(MUSTELA_BUILD_SHELL)
 
     target_link_libraries(mustela PRIVATE mustela_warnings)
 endif()
+
+install(EXPORT mustela_targets
+    FILE mustela-targets.cmake
+    NAMESPACE mustela::
+    DESTINATION lib/cmake/mustela)
 
 set(CPACK_PACKAGE_NAME "mustela")
 set(CPACK_PACKAGE_VENDOR "mustela")
