@@ -135,7 +135,15 @@ Known gaps, tracked for the next pass: the ceiling only warns — there is no ta
 - Honest limits: dictionaries come from the system enchant setup (e.g. `hunspell-en-us`, `hunspell-ru`) — with none installed the switch is a silent no-op; MHTML captures the current DOM without scripts and is a snapshot, not a live page; the WinCairo C API has neither surface in the pin. (GTK-only)
 - Test suite 532 → 538 checks: spellcheck settings parsing (round-trip, partial file, defaults). (done)
 
-## K1 — Kiwi browser
+## K1 — Core public surface (done)
+
+- Declared surface under `include/mustela/`: an umbrella `mustela.hpp` over `settings` (the `config.hpp` TOML module), `privacy`, `permissions`, `site_rules`, `fingerprint`, `browsing_data`, `perf`, `history`, `url`, `bookmarks` and `profile`, plus a self-contained `version.hpp` with `MUSTELA_CORE_API_VERSION` — the surface version moves independently of the engine release number. Forwarding headers keep the implementation in `src/core` as the single source of truth; consuming needs only `-Iinclude` and a link against the static core, and `cmake --install` ships `libmustela_core.a` with the headers. (done)
+- `Profile` handle in the core (`profile.hpp`): a root directory expands into the standard layout (`history.dat`, `bookmarks.tsv`, `session.json`, `perf.jsonl`, `filters/`, `favicons/`), carries its own `PrivacyPolicy` copy, and manages its file-backed stores through `ensure_dirs` / `has` / `clear` per `ProfileStore`; `default_profile_root()` computes the platform default (`XDG_DATA_HOME`/`$HOME/.local/share` on Linux, `%LOCALAPPDATA%` on Windows). Cookies, cache and web storage stay port-owned — WebKit data managers and the existing `ClearRequest` mapping cover those. (done)
+- Per-site dressing next to the policy: `SitePolicy` grows `zoom` (0.3–3.0, clamped on load and on `set`; 0 = inherit), `user_agent` and `css` (single-line quoted strings) — parsed from and saved to the same `sites.toml`, resolved with the existing wholesale closest-rule semantics, and guarded by the same public-suffix rules. (done)
+- Harness adoption and limits: the GTK shell builds every profile path through `Profile` (same on-disk layout, `settings.toml`/`sites.toml` stay at the config root); the Windows shell keeps its own path plumbing for now; no port applies per-site zoom/UA/CSS yet — that lands with the Kiwi embedder, which is the API's primary consumer. (done, ports follow)
+- Test suite 538 → 588 checks: site-rule dressing keys (parse, clamp, save round-trip, empty-erasure), the `Profile` handle (paths, ensure/has/clear, policy holder, default root) and the public surface (umbrella include, API version). (done)
+
+## Kiwi — product browser
 
 - The product browser lives in the separate [Kiwi](https://github.com/mel0k1/Kiwi) repository; mustela-shell stays the engine's test harness.
 - Engine capabilities it consumes: stable settings API, privacy policy with per-site rules, profiles, packaging hooks.

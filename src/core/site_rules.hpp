@@ -17,6 +17,9 @@ struct SitePolicy {
     SiteRule cookies = SiteRule::Default;
     SiteRule fingerprint = SiteRule::Default;
     SiteRule permissions = SiteRule::Default;
+    double zoom = 0.0;
+    std::string user_agent;
+    std::string css;
 };
 
 const char* site_rule_name(SiteRule rule);

@@ -28,6 +28,7 @@
 #include "perf.hpp"
 #include "permissions.hpp"
 #include "privacy.hpp"
+#include "profile.hpp"
 #include "proxy_server.hpp"
 #include "session.hpp"
 #include "site_rules.hpp"
@@ -95,6 +96,7 @@ struct Browser {
     std::unique_ptr<mustela::ProxyServer> proxy;
     std::string session_path;
     std::string favicons_dir;
+    std::unique_ptr<mustela::Profile> profile;
     std::unique_ptr<mustela::PerfLog> perf;
     std::int64_t memory_bytes = 0;
     bool memory_over = false;
@@ -2126,6 +2128,7 @@ gboolean do_settings_reload(gpointer) {
     report_settings_issues(report);
     g_free(path);
     b.privacy = mustela::privacy_from(b.settings);
+    if (b.profile) b.profile->set_policy(b.privacy);
 
     apply_cookie_policy(b.normal_context, b.privacy.cookies);
     WebKitWebsiteDataManager* manager = webkit_web_context_get_website_data_manager(b.normal_context);
@@ -2136,11 +2139,7 @@ gboolean do_settings_reload(gpointer) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(b.private_toggle), b.privacy.default_private == TabPrivacy::Private);
 
     if (b.privacy.history_enabled && !b.history) {
-        gchar* profile_dir = g_build_filename(g_get_user_data_dir(), "mustela", "profiles", "default", nullptr);
-        gchar* history_path = g_build_filename(profile_dir, "history.dat", nullptr);
-        b.history = std::make_unique<mustela::HistoryStore>(history_path);
-        g_free(history_path);
-        g_free(profile_dir);
+        b.history = std::make_unique<mustela::HistoryStore>(b.profile->paths().history);
     }
 
     apply_policies_to_tabs(b);
@@ -2225,37 +2224,34 @@ int mustela_main(int argc, char** argv) {
     g_free(sites_path);
 
     gchar* profile_dir = g_build_filename(g_get_user_data_dir(), "mustela", "profiles", "default", nullptr);
-    g_mkdir_with_parents(profile_dir, 0700);
-    browser->perf = std::make_unique<mustela::PerfLog>(std::string(profile_dir) + "/perf.jsonl");
+    browser->profile = std::make_unique<mustela::Profile>(std::string(profile_dir), browser->privacy);
+    browser->profile->ensure_dirs();
+    g_free(profile_dir);
+    browser->perf = std::make_unique<mustela::PerfLog>(browser->profile->paths().perf_log);
 
     if (browser->privacy.history_enabled) {
-        gchar* history_path = g_build_filename(profile_dir, "history.dat", nullptr);
-        browser->history = std::make_unique<mustela::HistoryStore>(history_path);
-        g_free(history_path);
+        browser->history = std::make_unique<mustela::HistoryStore>(browser->profile->paths().history);
     }
-    browser->bookmarks = std::make_unique<mustela::BookmarkStore>(std::string(profile_dir) + "/bookmarks.tsv");
+    browser->bookmarks = std::make_unique<mustela::BookmarkStore>(browser->profile->paths().bookmarks);
 
-    gchar* filters_dir = g_build_filename(profile_dir, "filters", nullptr);
-    g_mkdir_with_parents(filters_dir, 0700);
-    browser->filter_store = webkit_user_content_filter_store_new(filters_dir);
-    g_free(filters_dir);
+    browser->filter_store = webkit_user_content_filter_store_new(browser->profile->paths().filters.c_str());
     static const char fonts_filter_json[] =
         "[{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"font\"]},\"action\":{\"type\":\"block\"}}]";
     GBytes* fonts_source = g_bytes_new_static(fonts_filter_json, sizeof(fonts_filter_json) - 1);
     webkit_user_content_filter_store_save(browser->filter_store, "block-remote-fonts", fonts_source,
         nullptr, on_fonts_filter_saved, nullptr);
     g_bytes_unref(fonts_source);
-    browser->session_path = std::string(profile_dir) + "/session.json";
+    browser->session_path = browser->profile->paths().session;
     compile_blocklist_filter(*browser);
 
     WebKitWebsiteDataManager* data_manager =
-        webkit_website_data_manager_new("base-data-directory", profile_dir, nullptr);
+        webkit_website_data_manager_new("base-data-directory", browser->profile->root().c_str(), nullptr);
     webkit_website_data_manager_set_itp_enabled(data_manager,
         browser->privacy.hardening.tracking_prevention ? TRUE : FALSE);
     browser->normal_context = webkit_web_context_new_with_website_data_manager(data_manager);
     g_object_unref(data_manager);
     browser->private_context = webkit_web_context_new_ephemeral();
-    browser->favicons_dir = std::string(profile_dir) + "/favicons";
+    browser->favicons_dir = browser->profile->paths().favicons;
     g_mkdir_with_parents(browser->favicons_dir.c_str(), 0700);
     webkit_web_context_set_favicon_database_directory(browser->normal_context, browser->favicons_dir.c_str());
     apply_process_model(browser->normal_context, browser->settings.process_model);
@@ -2412,7 +2408,6 @@ int mustela_main(int argc, char** argv) {
 
     g_free(config_dir);
     g_free(config_path);
-    g_free(profile_dir);
     if (browser->gapp) {
         g_application_release(browser->gapp);
         g_clear_object(&browser->gapp);

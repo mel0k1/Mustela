@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mustela
-    VERSION 0.15.0
+    VERSION 0.16.0
     DESCRIPTION "Privacy-first, cross-platform browser engine built on WebKit"
     LANGUAGES CXX)
 
@@ -36,9 +36,13 @@ add_library(mustela_core STATIC
     src/core/proxy_server.cpp
     src/core/session.cpp
     src/core/bookmarks.cpp
+    src/core/profile.cpp
     src/core/error_page.cpp)
-target_include_directories(mustela_core PUBLIC src src/core)
+target_include_directories(mustela_core PUBLIC src src/core include)
 target_link_libraries(mustela_core PUBLIC mustela_warnings)
+
+install(TARGETS mustela_core ARCHIVE DESTINATION lib)
+install(DIRECTORY include/mustela DESTINATION include)
 
 if(WIN32)
     target_link_libraries(mustela_core PUBLIC ws2_32)

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -30,12 +31,14 @@
 #include "perf.hpp"
 #include "permissions.hpp"
 #include "privacy.hpp"
+#include "profile.hpp"
 #include "psl.hpp"
 #include "proxy_server.hpp"
 #include "session.hpp"
 #include "site_rules.hpp"
 #include "ui_text.hpp"
 #include "url.hpp"
+#include "mustela/mustela.hpp"
 
 namespace {
 
@@ -1494,6 +1497,124 @@ void test_error_page() {
     CHECK(capped.find("Try again") != std::string::npos);
 }
 
+void test_site_rules_extras() {
+    std::string path = write_temp("sites_extra.toml",
+        "[www.example.org]\n"
+        "zoom = 1.5\n"
+        "user_agent = \"Mozilla/5.0 MustelaTest\"\n"
+        "css = \"body { margin: 0 }\"\n"
+        "[wide.example]\n"
+        "zoom = 9.0\n"
+        "[zoomed.example]\n"
+        "zoom = 0.05\n"
+        "[bad.example]\n"
+        "zoom = not-a-number\n");
+    mustela::SiteRules rules(path);
+    rules.load();
+    const mustela::SitePolicy* exact = rules.find("www.example.org");
+    CHECK(exact);
+    CHECK(exact->zoom == 1.5);
+    CHECK_STR(exact->user_agent, "Mozilla/5.0 MustelaTest");
+    CHECK_STR(exact->css, "body { margin: 0 }");
+    CHECK(rules.policy_for("sub.www.example.org").zoom == 1.5);
+    CHECK_STR(rules.policy_for("sub.www.example.org").css, "body { margin: 0 }");
+    CHECK(rules.policy_for("wide.example").zoom == 3.0);
+    CHECK(rules.policy_for("zoomed.example").zoom == 0.3);
+    CHECK(rules.policy_for("bad.example").zoom == 0.0);
+    CHECK(rules.entries().size() == 3);
+
+    mustela::SitePolicy only_zoom;
+    only_zoom.zoom = 1.25;
+    rules.set("zoomonly.example", only_zoom);
+    CHECK(rules.entries().size() == 4);
+    CHECK(rules.policy_for("zoomonly.example").zoom == 1.25);
+    CHECK(rules.policy_for("zoomonly.example").javascript == mustela::SiteRule::Default);
+
+    mustela::SitePolicy blank;
+    rules.set("zoomonly.example", blank);
+    CHECK(rules.entries().size() == 3);
+
+    mustela::SitePolicy clamped;
+    clamped.zoom = 42.0;
+    rules.set("clamp.example", clamped);
+    CHECK(rules.policy_for("clamp.example").zoom == 3.0);
+    clamped.zoom = 0.1;
+    rules.set("clamp.example", clamped);
+    CHECK(rules.policy_for("clamp.example").zoom == 0.3);
+    CHECK(rules.entries().size() == 4);
+
+    rules.save();
+    mustela::SiteRules reloaded(path);
+    reloaded.load();
+    CHECK(reloaded.policy_for("www.example.org").zoom == 1.5);
+    CHECK_STR(reloaded.policy_for("www.example.org").user_agent, "Mozilla/5.0 MustelaTest");
+    CHECK_STR(reloaded.policy_for("www.example.org").css, "body { margin: 0 }");
+    CHECK(reloaded.policy_for("zoomonly.example").zoom == 0.0);
+    CHECK(reloaded.policy_for("clamp.example").zoom == 0.3);
+}
+
+void test_profile_handle() {
+    std::string root = temp_path("profile-root");
+    std::error_code wipe;
+    std::filesystem::remove_all(root, wipe);
+    mustela::PrivacyPolicy policy;
+    policy.gpc = false;
+    mustela::Profile profile(root, policy);
+    CHECK_STR(profile.root(), root);
+    CHECK_STR(profile.paths().history, root + "/history.dat");
+    CHECK_STR(profile.paths().bookmarks, root + "/bookmarks.tsv");
+    CHECK_STR(profile.paths().session, root + "/session.json");
+    CHECK_STR(profile.paths().perf_log, root + "/perf.jsonl");
+    CHECK_STR(profile.paths().filters, root + "/filters");
+    CHECK_STR(profile.paths().favicons, root + "/favicons");
+    CHECK(!profile.has(mustela::ProfileStore::History));
+    CHECK(!profile.has(mustela::ProfileStore::Filters));
+    profile.ensure_dirs();
+    CHECK(profile.has(mustela::ProfileStore::Filters));
+    CHECK(profile.has(mustela::ProfileStore::Favicons));
+    {
+        std::ofstream out(profile.paths().history);
+        out << "stub";
+    }
+    {
+        std::ofstream out(profile.paths().session);
+        out << "{}";
+    }
+    CHECK(profile.has(mustela::ProfileStore::History));
+    CHECK(profile.has(mustela::ProfileStore::Session));
+    CHECK(!profile.has(mustela::ProfileStore::Bookmarks));
+    profile.clear(mustela::ProfileStore::History);
+    profile.clear(mustela::ProfileStore::Session);
+    CHECK(!profile.has(mustela::ProfileStore::History));
+    CHECK(!profile.has(mustela::ProfileStore::Session));
+    CHECK(profile.has(mustela::ProfileStore::Favicons));
+    profile.clear(mustela::ProfileStore::Favicons);
+    CHECK(!profile.has(mustela::ProfileStore::Favicons));
+    CHECK(!profile.policy().gpc);
+    profile.set_policy(mustela::PrivacyPolicy{});
+    CHECK(profile.policy().gpc);
+
+    std::string def = mustela::default_profile_root();
+    CHECK(!def.empty());
+    CHECK(def.find("mustela") != std::string::npos);
+    CHECK(def.find("profiles/default") != std::string::npos);
+
+    mustela::Profile empty;
+    CHECK(empty.root().empty());
+    CHECK(!empty.has(mustela::ProfileStore::History));
+}
+
+void test_public_surface() {
+    CHECK(mustela::core_api_version() >= 1);
+    CHECK(MUSTELA_CORE_API_VERSION >= 1);
+    mustela::SitePolicy surface_fields;
+    surface_fields.zoom = 1.0;
+    surface_fields.user_agent = "ua";
+    surface_fields.css = "c";
+    mustela::ProfilePaths surface_paths;
+    CHECK(surface_paths.history.empty());
+}
+
 int main() {
     test_settings_roundtrip();
     test_settings_partial_file();
@@ -1521,6 +1642,9 @@ int main() {
     test_proxy_server_loopback();
     test_bookmarks_store();
     test_error_page();
+    test_site_rules_extras();
+    test_profile_handle();
+    test_public_surface();
 
     if (failures > 0) {
         std::fprintf(stderr, "%d/%d checks failed\n", failures, checks);

@@ -94,11 +94,18 @@ javascript = "deny"
 [tracker.example.org]
 cookies = "deny"
 
-[maps.example.com]
+[aps.example.com]
 fingerprint = "allow"
+
+[slow.example.org]
+zoom = 1.5
+user_agent = "Mozilla/5.0 (X11; Linux x86_64)"
+css = "body { font-size: 18px }"
 ```
 
 A rule for a domain covers its subdomains (`example.org` matches `www.example.org`). Sections for registry suffixes (`[com]`, `[co.uk]`, any public suffix from the bundled list) are ignored on load and cannot be written back, so a single entry can never cover a whole registry; IP addresses and `localhost` are valid hosts. The same rules are editable at runtime in the site-rules window (`Ctrl+Shift+S`): buttons act on the selected row, or on the current site when nothing is selected. `fingerprint = "allow"` exempts the site from all fingerprint switches (use for maps, games, canvas apps); `fingerprint = "deny"` forces the strict set on it. `permissions = "allow"` remembers a granted permission for the host (skip the prompt for future requests); `permissions = "deny"` blocks them without asking. Both are also written by the "Always allow" / "Never allow" choices in the permission prompt; private tabs never write rules.
+
+Three dressing keys round out a rule for the Kiwi embedder: `zoom` (0.3–3.0, other values are clamped; 0 or absent means the global default), `user_agent` (a single-line quoted string overriding the agent for that host) and `css` (a single-line quoted stylesheet injected for that host). The closest matching rule wins as a whole — a host's section replaces its parent's entirely, there is no per-key merge. These keys are core API today; the shell harness does not apply them yet.
 
 ## Shortcuts
 

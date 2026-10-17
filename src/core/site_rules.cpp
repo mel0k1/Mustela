@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <utility>
 
@@ -23,6 +24,19 @@ std::string to_lower(const std::string& s) {
     std::transform(out.begin(), out.end(), out.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return out;
+}
+
+double clamp_zoom_scale(double value) {
+    if (!(value > 0.0)) return 0.0;
+    if (value < 0.3) return 0.3;
+    if (value > 3.0) return 3.0;
+    return value;
+}
+
+bool policy_empty(const SitePolicy& policy) {
+    return policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
+        && policy.fingerprint == SiteRule::Default && policy.permissions == SiteRule::Default
+        && policy.zoom == 0.0 && policy.user_agent.empty() && policy.css.empty();
 }
 
 }
@@ -97,6 +111,13 @@ void SiteRules::load() {
         if (key == "cookies") rules_[host].cookies = site_rule_from(value);
         if (key == "fingerprint") rules_[host].fingerprint = site_rule_from(value);
         if (key == "permissions") rules_[host].permissions = site_rule_from(value);
+        if (key == "zoom") {
+            char* end = nullptr;
+            double parsed = std::strtod(value.c_str(), &end);
+            if (end != value.c_str()) rules_[host].zoom = clamp_zoom_scale(parsed);
+        }
+        if (key == "user_agent") rules_[host].user_agent = value;
+        if (key == "css") rules_[host].css = value;
     }
 }
 
@@ -105,8 +126,7 @@ void SiteRules::save() const {
     if (!out) return;
 
     for (const auto& [host, policy] : rules_) {
-        if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
-            && policy.fingerprint == SiteRule::Default && policy.permissions == SiteRule::Default) continue;
+        if (policy_empty(policy)) continue;
         out << "[" << host << "]\n";
         if (policy.javascript != SiteRule::Default) {
             out << "javascript = \"" << site_rule_name(policy.javascript) << "\"\n";
@@ -119,6 +139,15 @@ void SiteRules::save() const {
         }
         if (policy.permissions != SiteRule::Default) {
             out << "permissions = \"" << site_rule_name(policy.permissions) << "\"\n";
+        }
+        if (policy.zoom != 0.0) {
+            out << "zoom = " << policy.zoom << "\n";
+        }
+        if (!policy.user_agent.empty()) {
+            out << "user_agent = \"" << policy.user_agent << "\"\n";
+        }
+        if (!policy.css.empty()) {
+            out << "css = \"" << policy.css << "\"\n";
         }
         out << "\n";
     }
@@ -146,12 +175,13 @@ SitePolicy SiteRules::policy_for(const std::string& host) const {
 void SiteRules::set(const std::string& host, const SitePolicy& policy) {
     std::string key = to_lower(trim(host));
     if (key.empty() || is_public_suffix(key)) return;
-    if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
-        && policy.fingerprint == SiteRule::Default && policy.permissions == SiteRule::Default) {
+    SitePolicy normalized = policy;
+    normalized.zoom = clamp_zoom_scale(policy.zoom);
+    if (policy_empty(normalized)) {
         rules_.erase(key);
         return;
     }
-    rules_[key] = policy;
+    rules_[key] = normalized;
 }
 
 void SiteRules::remove(const std::string& host) {
@@ -161,8 +191,7 @@ void SiteRules::remove(const std::string& host) {
 std::vector<SiteRules::Entry> SiteRules::entries() const {
     std::vector<Entry> out;
     for (const auto& [host, policy] : rules_) {
-        if (policy.javascript == SiteRule::Default && policy.cookies == SiteRule::Default
-            && policy.fingerprint == SiteRule::Default && policy.permissions == SiteRule::Default) continue;
+        if (policy_empty(policy)) continue;
         out.push_back(Entry{host, policy});
     }
     return out;
