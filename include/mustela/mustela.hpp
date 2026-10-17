@@ -1,5 +1,6 @@
 #pragma once
 
+#include "autofill.hpp"
 #include "browsing_data.hpp"
 #include "bookmarks.hpp"
 #include "fingerprint.hpp"
@@ -8,6 +9,7 @@
 #include "perf.hpp"
 #include "privacy.hpp"
 #include "profile.hpp"
+#include "search.hpp"
 #include "settings.hpp"
 #include "site_rules.hpp"
 #include "url.hpp"

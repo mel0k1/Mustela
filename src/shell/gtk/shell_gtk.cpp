@@ -30,6 +30,7 @@
 #include "privacy.hpp"
 #include "profile.hpp"
 #include "proxy_server.hpp"
+#include "search.hpp"
 #include "session.hpp"
 #include "site_rules.hpp"
 #include "tab.hpp"
@@ -1114,8 +1115,35 @@ void on_url_activate(GtkEntry*, gpointer) {
     Tab* tab = active_tab(*browser);
     if (!tab) return;
     const gchar* text = gtk_entry_get_text(GTK_ENTRY(browser->url_entry));
-    std::string url = mustela::normalize_url(text, browser->settings.search_template);
+    std::string url = mustela::resolve_entry(text, browser->settings);
     if (!url.empty()) webkit_web_view_load_uri(tab->view(), url.c_str());
+}
+
+void on_drop_data_received(GtkWidget*, GdkDragContext* context, gint, gint,
+    GtkSelectionData* selection, guint info, guint time, gpointer) {
+    Browser& b = *browser;
+    std::string text;
+    if (info == 0) {
+        gchar** uris = gtk_selection_data_get_uris(selection);
+        if (uris && uris[0]) text = uris[0];
+        g_strfreev(uris);
+    } else {
+        guchar* raw = gtk_selection_data_get_text(selection);
+        if (raw) {
+            text = reinterpret_cast<const char*>(raw);
+            g_free(raw);
+        }
+    }
+    size_t endline = text.find_first_of("\r\n");
+    if (endline != std::string::npos) text.resize(endline);
+    if (text.empty()) {
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+    std::string url = mustela::resolve_entry(text, b.settings);
+    Tab* tab = active_tab(b);
+    if (tab && !url.empty()) webkit_web_view_load_uri(tab->view(), url.c_str());
+    gtk_drag_finish(context, TRUE, FALSE, time);
 }
 
 void on_switch_page(GtkNotebook*, GtkWidget*, guint, gpointer) {
@@ -1130,6 +1158,17 @@ void on_switch_page(GtkNotebook*, GtkWidget*, guint, gpointer) {
 
 void on_page_removed(GtkNotebook*, GtkWidget*, gpointer) {
     refresh_chrome(*browser);
+}
+
+void on_page_reordered(GtkNotebook*, GtkWidget* child, guint page_num, gpointer) {
+    Browser& b = *browser;
+    Tab* tab = tab_from_view(b, WEBKIT_WEB_VIEW(child));
+    if (!tab) return;
+    gint old = tab_index(b, tab);
+    if (old < 0 || old == static_cast<gint>(page_num)) return;
+    std::unique_ptr<Tab> moved = std::move(b.tabs[static_cast<size_t>(old)]);
+    b.tabs.erase(b.tabs.begin() + old);
+    b.tabs.insert(b.tabs.begin() + page_num, std::move(moved));
 }
 
 void run_js_alert(Browser& b, const std::string& message) {
@@ -1207,6 +1246,7 @@ GtkWidget* on_view_create(WebKitWebView* view, WebKitNavigationAction* action, g
     tab->set_label(build_tab_label(b, tab));
     b.tabs.emplace_back(tab);
     gtk_notebook_append_page(GTK_NOTEBOOK(b.notebook), GTK_WIDGET(related), tab->label());
+    gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(b.notebook), GTK_WIDGET(related), TRUE);
     connect_tab_signals(tab);
     return GTK_WIDGET(related);
 }
@@ -1678,6 +1718,7 @@ Tab* open_tab(Browser& b, const char* url, TabPrivacy request) {
     b.tabs.emplace_back(tab);
 
     gint idx = gtk_notebook_append_page(GTK_NOTEBOOK(b.notebook), GTK_WIDGET(view), tab->label());
+    gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(b.notebook), GTK_WIDGET(view), TRUE);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(b.notebook), idx);
     gtk_widget_show(GTK_WIDGET(view));
 
@@ -2223,10 +2264,27 @@ int mustela_main(int argc, char** argv) {
     browser->sites_monitor = monitor_file(sites_path, G_CALLBACK(on_sites_file_changed));
     g_free(sites_path);
 
-    gchar* profile_dir = g_build_filename(g_get_user_data_dir(), "mustela", "profiles", "default", nullptr);
-    browser->profile = std::make_unique<mustela::Profile>(std::string(profile_dir), browser->privacy);
+    gchar* profiles_path = g_build_filename(config_dir, "profiles.toml", nullptr);
+    if (!g_file_test(profiles_path, G_FILE_TEST_EXISTS)) {
+        mustela::save_profile_registry(profiles_path, mustela::default_profile_registry());
+    }
+    mustela::ProfileRegistry registry = mustela::load_profile_registry(profiles_path);
+    g_free(profiles_path);
+    const mustela::ProfileEntry* entry = registry.find(browser->settings.shell_profile);
+    if (!entry) entry = registry.find(registry.default_id);
+    if (!entry && !registry.entries.empty()) entry = &registry.entries.front();
+    mustela::ProfileEntry fallback_entry;
+    if (!entry) {
+        fallback_entry.id = "default";
+        fallback_entry.root = "profiles/default";
+        entry = &fallback_entry;
+    }
+
+    gchar* data_base = g_build_filename(g_get_user_data_dir(), "mustela", nullptr);
+    std::string profile_root = mustela::resolve_profile_root(*entry, data_base);
+    g_free(data_base);
+    browser->profile = std::make_unique<mustela::Profile>(profile_root, browser->privacy);
     browser->profile->ensure_dirs();
-    g_free(profile_dir);
     browser->perf = std::make_unique<mustela::PerfLog>(browser->profile->paths().perf_log);
 
     if (browser->privacy.history_enabled) {
@@ -2284,6 +2342,12 @@ int mustela_main(int argc, char** argv) {
     browser->window = window;
     gtk_window_set_title(GTK_WINDOW(window), "Mustela");
     gtk_window_set_default_size(GTK_WINDOW(window), browser->settings.window_width, browser->settings.window_height);
+    static const GtkTargetEntry drop_targets[] = {
+        {(gchar*)"text/uri-list", 0, 0},
+        {(gchar*)"text/plain", 0, 1},
+    };
+    gtk_drag_dest_set(window, GTK_DEST_DEFAULT_ALL, drop_targets, 2, GDK_ACTION_COPY);
+    g_signal_connect(window, "drag-data-received", G_CALLBACK(on_drop_data_received), nullptr);
     g_signal_connect(window, "destroy", G_CALLBACK(on_destroy), nullptr);
     g_signal_connect(window, "key-press-event", G_CALLBACK(on_key_press), nullptr);
     g_signal_connect(window, "map-event", G_CALLBACK(on_window_mapped), nullptr);
@@ -2376,6 +2440,7 @@ int mustela_main(int argc, char** argv) {
     g_signal_connect(browser->url_entry, "activate", G_CALLBACK(on_url_activate), nullptr);
     g_signal_connect(browser->notebook, "switch-page", G_CALLBACK(on_switch_page), nullptr);
     g_signal_connect(browser->notebook, "page-removed", G_CALLBACK(on_page_removed), nullptr);
+    g_signal_connect(browser->notebook, "page-reordered", G_CALLBACK(on_page_reordered), nullptr);
 
     TabPrivacy request = start_private ? TabPrivacy::Private : browser->privacy.default_private;
     if (request == TabPrivacy::Private) {

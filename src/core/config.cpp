@@ -223,6 +223,8 @@ Settings load_settings(const std::string& path, SettingsReport& report) {
     Settings settings;
     apply(pairs, "shell.homepage", settings.homepage, &report);
     apply(pairs, "shell.search_template", settings.search_template, &report);
+    apply(pairs, "shell.profile", settings.shell_profile, &report);
+    apply(pairs, "search.default", settings.search_default, &report);
     apply(pairs, "shell.window_width", settings.window_width, &report);
     apply(pairs, "shell.window_height", settings.window_height, &report);
     apply(pairs, "privacy.private_tabs_enabled", settings.private_tabs_enabled, &report);
@@ -269,6 +271,42 @@ Settings load_settings(const std::string& path, SettingsReport& report) {
     apply(pairs, "proxy.user", settings.proxy_user, &report);
     apply(pairs, "proxy.password", settings.proxy_password, &report);
 
+    for (auto it = pairs.begin(); it != pairs.end();) {
+        const std::string prefix = "search.engines.";
+        if (it->first.rfind(prefix, 0) != 0) {
+            ++it;
+            continue;
+        }
+        std::string rest = it->first.substr(prefix.size());
+        size_t dot = rest.find('.');
+        if (dot == std::string::npos || dot == 0 || dot + 1 == rest.size()) {
+            report.invalid_values.push_back(it->first);
+            it = pairs.erase(it);
+            continue;
+        }
+        std::string keyword = rest.substr(0, dot);
+        std::string field = rest.substr(dot + 1);
+        SearchEngine* engine = nullptr;
+        for (auto& candidate : settings.search_engines) {
+            if (candidate.keyword == keyword) engine = &candidate;
+        }
+        if (!engine) {
+            SearchEngine fresh;
+            fresh.keyword = keyword;
+            settings.search_engines.push_back(std::move(fresh));
+            engine = &settings.search_engines.back();
+        }
+        if (field == "name") {
+            engine->name = it->second;
+        } else if (field == "template") {
+            engine->url_template = it->second;
+        } else {
+            report.invalid_values.push_back(it->first);
+        }
+        ++report.applied;
+        it = pairs.erase(it);
+    }
+
     for (const auto& [key, value] : pairs) {
         report.unknown_keys.push_back(key);
     }
@@ -290,6 +328,16 @@ void save_settings(const std::string& path, const Settings& settings) {
     out << "devtools = " << (settings.devtools ? "true" : "false") << "\n";
     out << "spellcheck = " << (settings.spellcheck ? "true" : "false") << "\n";
     out << "spellcheck_languages = \"" << settings.spellcheck_languages << "\"\n";
+    out << "profile = \"" << settings.shell_profile << "\"\n";
+    out << "\n[search]\n";
+    out << "default = \"" << settings.search_default << "\"\n";
+    if (!settings.search_engines.empty()) {
+        out << "\n[search.engines]\n";
+        for (const auto& engine : settings.search_engines) {
+            out << engine.keyword << ".name = \"" << engine.name << "\"\n";
+            out << engine.keyword << ".template = \"" << engine.url_template << "\"\n";
+        }
+    }
     out << "\n[privacy]\n";
     out << "private_tabs_enabled = " << (settings.private_tabs_enabled ? "true" : "false") << "\n";
     out << "start_in_private = " << (settings.start_in_private ? "true" : "false") << "\n";

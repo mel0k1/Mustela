@@ -27,6 +27,7 @@
 #include "permissions.hpp"
 #include "privacy.hpp"
 #include "proxy_server.hpp"
+#include "search.hpp"
 #include "session.hpp"
 #include "site_rules.hpp"
 #include "ui_text.hpp"
@@ -1758,7 +1759,7 @@ void navigate_tab(WinTab& tab, const std::string& url) {
 void load_url_text(Browser& b, const std::string& text) {
     WinTab* tab = active_tab(b);
     if (!tab) return;
-    std::string url = mustela::normalize_url(text, b.settings.search_template);
+    std::string url = mustela::resolve_entry(text, b.settings);
     navigate_tab(*tab, url);
 }
 

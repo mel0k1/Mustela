@@ -1,11 +1,18 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace mustela {
 
 constexpr int kSettingsVersion = 1;
+
+struct SearchEngine {
+    std::string keyword;
+    std::string name;
+    std::string url_template;
+};
 
 struct SettingsReport {
     int version = 0;
@@ -21,6 +28,9 @@ struct SettingsReport {
 struct Settings {
     std::string homepage = "https://example.org";
     std::string search_template = "https://duckduckgo.com/?q=%s";
+    std::string search_default;
+    std::vector<SearchEngine> search_engines;
+    std::string shell_profile = "default";
     int window_width = 1280;
     int window_height = 800;
     bool private_tabs_enabled = true;

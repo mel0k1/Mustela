@@ -38,7 +38,8 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | Key | Default | Meaning |
 |-----|---------|---------|
 | shell.homepage | https://example.org | start page for new tabs |
-| shell.search_template | https://duckduckgo.com/?q=%s | `%s` is replaced with the query |
+| shell.search_template | https://duckduckgo.com/?q=%s | `%s` is replaced with the query (used when no `[search.engines]` entries exist) |
+| shell.profile | default | profile id from `profiles.toml` whose data directory the browser uses |
 | shell.window_width | 1280 | window width, updated on exit |
 | shell.window_height | 800 | window height, updated on exit |
 | shell.zoom | 1.0 | default zoom for new tabs, 0.3–3.0 (Ctrl+plus/minus/0 changes the active tab) |
@@ -80,6 +81,41 @@ Settings live in `~/.config/mustela/settings.toml`, created on first run and sav
 | perf.log | true | append startup, page-load and memory samples to `perf.jsonl` in the profile directory |
 
 Profile data (cookies, cache, storage) lives under `~/.local/share/mustela/profiles/default`; private tabs use an in-memory context instead. The compiled remote-font filter is cached under the same profile in `filters/`, and performance samples are appended to `perf.jsonl` there.
+
+### Profiles
+
+The profile registry lives in `~/.config/mustela/profiles.toml`:
+
+```toml
+default = "main"
+
+[profiles.main]
+name = "Main"
+root = "profiles/main"
+
+[profiles.work]
+name = "Work"
+root = "profiles/work"
+```
+
+`root` resolves relative to `~/.local/share/mustela` (absolute paths are kept as-is); a missing file falls back to a single `default` profile with the historical layout. `shell.profile` in `settings.toml` picks the entry the shell uses; history, bookmarks, session, perf log, filters, favicons and `autofill.tsv` all live under the chosen root.
+
+### Search engines
+
+Multiple engines live in `settings.toml` under `[search.engines]`, with keyword shortcuts in the URL bar (`!g cats` searches cats through `g`):
+
+```toml
+[search]
+default = "ddg"
+
+[search.engines]
+ddg.name = "DuckDuckGo"
+ddg.template = "https://duckduckgo.com/?q=%s"
+gh.name = "GitHub"
+gh.template = "https://github.com/search?q=%s"
+```
+
+`%s` is replaced with the percent-encoded query; text that looks like a URL or a host is navigated directly, everything else goes through the engine selected by `search.default` (the first entry when unset or unknown, the legacy `shell.search_template` when no engines are defined).
 
 Both `settings.toml` and `sites.toml` are watched while the browser runs — edits apply to open tabs without a restart.
 
@@ -132,6 +168,8 @@ Three dressing keys round out a rule for the Kiwi embedder: `zoom` (0.3–3.0, o
 | Escape | stop loading |
 
 Linux shortcuts apply to the GTK port. The Windows port shares Ctrl+T, Ctrl+W, Ctrl+L, Ctrl+R, F5, Ctrl+H, Ctrl+F, Ctrl+Shift+Del, Alt+Left, Alt+Right and the zoom trio; Escape, Ctrl+Shift+S (site rules window), Ctrl+Shift+O (bookmarks window), Ctrl+Shift+I / F12 (devtools), Ctrl+P (print), Ctrl+Alt+S (screenshot) and Ctrl+S (save page) are GTK-only for now.
+
+Drag & drop (GTK): dropping a link, plain text or a file anywhere on the window chrome (toolbar, tab bar, status bar) navigates the active tab through the same URL/search pipeline as the address bar, and notebook tabs can be reordered by dragging their labels. Drops onto the page area are handled by WebKit itself so dragging text into editable fields keeps working.
 
 ## Popups, dialogs, find, downloads, permissions
 

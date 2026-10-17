@@ -1,6 +1,6 @@
 #pragma once
 
-#define MUSTELA_CORE_API_VERSION 1
+#define MUSTELA_CORE_API_VERSION 2
 
 namespace mustela {
 

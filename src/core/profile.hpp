@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "browsing_data.hpp"
 #include "privacy.hpp"
@@ -14,7 +15,8 @@ enum class ProfileStore : std::uint8_t {
     Session,
     PerfLog,
     Filters,
-    Favicons
+    Favicons,
+    Autofill
 };
 
 struct ProfilePaths {
@@ -25,6 +27,7 @@ struct ProfilePaths {
     std::string perf_log;
     std::string filters;
     std::string favicons;
+    std::string autofill;
 };
 
 class Profile {
@@ -49,5 +52,25 @@ private:
 };
 
 std::string default_profile_root();
+
+struct ProfileEntry {
+    std::string id;
+    std::string name;
+    std::string root;
+};
+
+struct ProfileRegistry {
+    std::vector<ProfileEntry> entries;
+    std::string default_id;
+
+    const ProfileEntry* find(const std::string& id) const;
+    void upsert(ProfileEntry entry);
+    bool remove(const std::string& id);
+};
+
+ProfileRegistry load_profile_registry(const std::string& path);
+void save_profile_registry(const std::string& path, const ProfileRegistry& registry);
+ProfileRegistry default_profile_registry();
+std::string resolve_profile_root(const ProfileEntry& entry, const std::string& base);
 
 }

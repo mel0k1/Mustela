@@ -34,6 +34,8 @@
 #include "profile.hpp"
 #include "psl.hpp"
 #include "proxy_server.hpp"
+#include "search.hpp"
+#include "autofill.hpp"
 #include "session.hpp"
 #include "site_rules.hpp"
 #include "ui_text.hpp"
@@ -1604,6 +1606,238 @@ void test_profile_handle() {
     CHECK(!empty.has(mustela::ProfileStore::History));
 }
 
+void test_search_engines() {
+    mustela::Settings plain;
+    CHECK(plain.search_engines.empty());
+    CHECK(plain.search_default.empty());
+    CHECK_STR(plain.shell_profile, "default");
+
+    mustela::SearchEngine fallback = mustela::default_search_engine(plain);
+    CHECK(fallback.keyword.empty());
+    CHECK_STR(fallback.url_template, plain.search_template);
+    CHECK_STR(mustela::resolve_entry("kittens", plain),
+        "https://duckduckgo.com/?q=kittens");
+    CHECK_STR(mustela::resolve_entry("  kittens  ", plain),
+        "https://duckduckgo.com/?q=kittens");
+    CHECK_STR(mustela::resolve_entry("two words", plain),
+        "https://duckduckgo.com/?q=two%20words");
+    CHECK_STR(mustela::resolve_entry("https://example.org/x", plain),
+        "https://example.org/x");
+    CHECK_STR(mustela::resolve_entry("example.org", plain), "https://example.org");
+    CHECK_STR(mustela::resolve_entry("localhost:8080/x", plain),
+        "https://localhost:8080/x");
+    CHECK_STR(mustela::resolve_entry("", plain), "");
+
+    mustela::Settings multi;
+    mustela::SearchEngine ddg;
+    ddg.keyword = "ddg";
+    ddg.name = "DuckDuckGo";
+    ddg.url_template = "https://duckduckgo.com/?q=%s";
+    mustela::SearchEngine gh;
+    gh.keyword = "GH";
+    gh.name = "GitHub";
+    gh.url_template = "https://github.com/search?q=%s&type=repositories";
+    multi.search_engines.push_back(ddg);
+    multi.search_engines.push_back(gh);
+    multi.search_default = "gh";
+
+    mustela::SearchEngine def = mustela::default_search_engine(multi);
+    CHECK_STR(def.keyword, "GH");
+    CHECK_STR(mustela::resolve_entry("cats", multi),
+        "https://github.com/search?q=cats&type=repositories");
+    CHECK_STR(mustela::resolve_entry("!ddg cats & dogs", multi),
+        "https://duckduckgo.com/?q=cats%20%26%20dogs");
+    CHECK_STR(mustela::resolve_entry("!gh webkit", multi),
+        "https://github.com/search?q=webkit&type=repositories");
+    CHECK_STR(mustela::resolve_entry("!DDG mixed case", multi),
+        "https://duckduckgo.com/?q=mixed%20case");
+    CHECK_STR(mustela::resolve_entry("!nosuch tags", multi),
+        "https://github.com/search?q=tags&type=repositories");
+    CHECK_STR(mustela::resolve_entry("!", multi),
+        "https://github.com/search?q=&type=repositories");
+    CHECK(mustela::find_search_engine(multi, "ddg").keyword == "ddg");
+    CHECK(mustela::find_search_engine(multi, "missing").url_template.empty());
+
+    multi.search_default = "gone";
+    def = mustela::default_search_engine(multi);
+    CHECK_STR(def.keyword, "ddg");
+
+    std::string path = temp_path("settings_engines");
+    std::error_code wipe;
+    std::filesystem::remove(path, wipe);
+    mustela::Settings original;
+    original.search_default = "gh";
+    original.search_engines.push_back(ddg);
+    original.search_engines.push_back(gh);
+    original.shell_profile = "work";
+    mustela::save_settings(path, original);
+    mustela::SettingsReport report;
+    mustela::Settings loaded = mustela::load_settings(path, report);
+    CHECK(report.unknown_keys.empty());
+    CHECK(report.invalid_values.empty());
+    CHECK(loaded.search_engines.size() == 2);
+    CHECK_STR(loaded.search_engines[0].keyword, "GH");
+    CHECK_STR(loaded.search_engines[0].url_template,
+        "https://github.com/search?q=%s&type=repositories");
+    CHECK_STR(loaded.search_engines[1].keyword, "ddg");
+    CHECK_STR(loaded.search_engines[1].name, "DuckDuckGo");
+    CHECK_STR(loaded.search_engines[1].url_template, "https://duckduckgo.com/?q=%s");
+    CHECK_STR(loaded.search_default, "gh");
+    CHECK_STR(loaded.shell_profile, "work");
+    CHECK_STR(mustela::resolve_entry("!gh round trip", loaded),
+        "https://github.com/search?q=round%20trip&type=repositories");
+
+    std::string bad = temp_path("settings_engines_bad");
+    {
+        std::ofstream out(bad);
+        out << "[search.engines]\n"
+            << "solo.template = \"https://solo.example/?q=%s\"\n"
+            << "solo.name = \"Solo\"\n"
+            << "broken = \"x\"\n";
+    }
+    loaded = mustela::load_settings(bad, report);
+    CHECK(loaded.search_engines.size() == 1);
+    CHECK_STR(loaded.search_engines[0].keyword, "solo");
+    CHECK_STR(loaded.search_engines[0].url_template, "https://solo.example/?q=%s");
+}
+
+void test_profile_registry() {
+    std::string path = temp_path("profiles_registry");
+    std::error_code wipe;
+    std::filesystem::remove(path, wipe);
+
+    mustela::ProfileRegistry missing = mustela::load_profile_registry(path);
+    CHECK(missing.entries.size() == 1);
+    CHECK_STR(missing.entries[0].id, "default");
+    CHECK_STR(missing.entries[0].root, "profiles/default");
+    CHECK_STR(missing.default_id, "default");
+    CHECK(missing.find("default") != nullptr);
+    CHECK(missing.find("other") == nullptr);
+
+    mustela::ProfileRegistry registry;
+    mustela::ProfileEntry main;
+    main.id = "main";
+    main.name = "Main";
+    main.root = "profiles/main";
+    registry.entries.push_back(main);
+    mustela::ProfileEntry work;
+    work.id = "work";
+    work.name = "Work";
+    work.root = "/abs/work";
+    registry.entries.push_back(work);
+    registry.default_id = "work";
+    mustela::save_profile_registry(path, registry);
+
+    mustela::ProfileRegistry loaded = mustela::load_profile_registry(path);
+    CHECK(loaded.entries.size() == 2);
+    CHECK_STR(loaded.default_id, "work");
+    const mustela::ProfileEntry* entry = loaded.find("main");
+    CHECK(entry != nullptr);
+    CHECK_STR(entry->name, "Main");
+    CHECK_STR(entry->root, "profiles/main");
+
+    loaded.upsert({"main", "Renamed", "profiles/renamed"});
+    CHECK(loaded.entries.size() == 2);
+    CHECK_STR(loaded.find("main")->name, "Renamed");
+    loaded.upsert({"extra", "Extra", "profiles/extra"});
+    CHECK(loaded.entries.size() == 3);
+    CHECK(loaded.find("extra") != nullptr);
+    loaded.upsert({"", "Empty", ""});
+    CHECK(loaded.entries.size() == 3);
+
+    CHECK(loaded.remove("extra"));
+    CHECK(!loaded.remove("extra"));
+    CHECK(loaded.entries.size() == 2);
+    CHECK(loaded.remove("work"));
+    CHECK_STR(loaded.default_id, "main");
+
+    mustela::ProfileEntry relative{"r", "R", "profiles/r"};
+    CHECK_STR(mustela::resolve_profile_root(relative, "/base"), "/base/profiles/r");
+    mustela::ProfileEntry absolute{"a", "A", "/abs/root"};
+    CHECK_STR(mustela::resolve_profile_root(absolute, "/base"), "/abs/root");
+    mustela::ProfileEntry empty_root{"e", "E", ""};
+    CHECK_STR(mustela::resolve_profile_root(empty_root, "/base"), "/base/e");
+}
+
+void test_autofill_store() {
+    std::string path = temp_path("autofill_store");
+    std::error_code wipe;
+    std::filesystem::remove(path, wipe);
+
+    mustela::AutofillStore store(path);
+    store.load();
+    CHECK(store.size() == 0);
+
+    store.upsert("example.org", "email", "a@example.org", 100);
+    store.upsert("example.org", "email", "b@example.org", 101);
+    store.upsert("example.org", "email", "a@example.org", 102);
+    store.upsert("www.example.org", "email", "c@example.org", 103);
+    store.upsert("other.net", "email", "d@example.net", 104);
+    store.upsert("example.org", "name", "Alice", 105);
+    CHECK(store.size() == 5);
+
+    std::vector<mustela::AutofillEntry> hits = store.find("example.org", "email");
+    CHECK(hits.size() == 2);
+    CHECK_STR(hits[0].value, "a@example.org");
+    CHECK(hits[0].uses == 2);
+    CHECK(hits[0].last_used == 102);
+    CHECK_STR(hits[1].value, "b@example.org");
+
+    std::vector<mustela::AutofillEntry> subdomain = store.find("www.example.org", "email");
+    CHECK(subdomain.size() == 3);
+    CHECK_STR(subdomain[0].value, "a@example.org");
+    CHECK_STR(subdomain[1].value, "c@example.org");
+    CHECK_STR(subdomain[2].value, "b@example.org");
+    std::vector<mustela::AutofillEntry> sibling = store.find("mail.example.org", "email");
+    CHECK(sibling.size() == 2);
+    CHECK(store.find("example.org", "missing").empty());
+    CHECK(store.find("example.net", "email").empty());
+    CHECK(store.find("", "email").empty());
+
+    std::vector<mustela::AutofillEntry> limited = store.find("example.org", "email", 1);
+    CHECK(limited.size() == 1);
+    CHECK_STR(limited[0].value, "a@example.org");
+
+    CHECK(store.remove("example.org", "email", "b@example.org"));
+    CHECK(!store.remove("example.org", "email", "b@example.org"));
+    CHECK(store.size() == 4);
+
+    store.save();
+    mustela::AutofillStore second(path);
+    second.load();
+    CHECK(second.size() == 4);
+    std::vector<mustela::AutofillEntry> reloaded = second.find("example.org", "email");
+    CHECK(reloaded.size() == 1);
+    CHECK_STR(reloaded[0].value, "a@example.org");
+    CHECK(reloaded[0].uses == 2);
+
+    mustela::AutofillStore weird(temp_path("autofill_weird"));
+    weird.upsert("example.org", "field", "with\ttab and\nnewline", 200);
+    weird.save();
+    mustela::AutofillStore back(temp_path("autofill_weird"));
+    back.load();
+    CHECK(back.size() == 1);
+    CHECK_STR(back.find("example.org", "field")[0].value, "with\ttab and\nnewline");
+
+    back.clear();
+    CHECK(back.size() == 0);
+
+    mustela::Profile profile(temp_path("autofill-profile-root"));
+    profile.ensure_dirs();
+    CHECK(!profile.has(mustela::ProfileStore::Autofill));
+    CHECK_STR(profile.paths().autofill, profile.root() + "/autofill.tsv");
+    {
+        std::ofstream out(profile.paths().autofill);
+        out << "example.org\temail\tx@example.org\t1\t5\n";
+    }
+    CHECK(profile.has(mustela::ProfileStore::Autofill));
+    mustela::AutofillStore from_profile(profile.paths().autofill);
+    from_profile.load();
+    CHECK(from_profile.size() == 1);
+    profile.clear(mustela::ProfileStore::Autofill);
+    CHECK(!profile.has(mustela::ProfileStore::Autofill));
+}
+
 void test_public_surface() {
     CHECK(mustela::core_api_version() >= 1);
     CHECK(MUSTELA_CORE_API_VERSION >= 1);
@@ -1644,6 +1878,9 @@ int main() {
     test_error_page();
     test_site_rules_extras();
     test_profile_handle();
+    test_search_engines();
+    test_profile_registry();
+    test_autofill_store();
     test_public_surface();
 
     if (failures > 0) {
