@@ -29,6 +29,7 @@
 #include "fingerprint.hpp"
 #include "fingerprint_scripts.hpp"
 #include "history.hpp"
+#include "import.hpp"
 #include "perf.hpp"
 #include "permissions.hpp"
 #include "privacy.hpp"
@@ -1986,6 +1987,171 @@ void test_autofill_scripts() {
     CHECK(std::string(capture).find("postMessage") != std::string::npos);
 }
 
+void test_chrome_time() {
+    CHECK(mustela::chrome_time_to_unix(13350000000000000) == 1705526400);
+    CHECK(mustela::chrome_time_to_unix(0) == 0);
+    CHECK(mustela::chrome_time_to_unix(1000) == 0);
+    CHECK(mustela::firefox_time_to_unix(1710000000000000) == 1710000000);
+    CHECK(mustela::firefox_time_to_unix(1710000000) == 1710000000);
+    CHECK(mustela::firefox_time_to_unix(0) == 0);
+}
+
+std::string lz4_all_literals(const std::string& data) {
+    std::string out;
+    if (data.empty()) return out;
+    out += static_cast<char>(0xF0);
+    size_t rest = data.size() - 15;
+    while (rest >= 255) {
+        out += static_cast<char>(255);
+        rest -= 255;
+    }
+    out += static_cast<char>(rest);
+    out += data;
+    return out;
+}
+
+std::string build_mozlz4(const std::string& json) {
+    std::string out = "mozLz40\0";
+    out.resize(8);
+    std::uint32_t size = static_cast<std::uint32_t>(json.size());
+    for (int i = 0; i < 4; ++i) {
+        out += static_cast<char>((size >> (8 * i)) & 0xFF);
+    }
+    out += lz4_all_literals(json);
+    return out;
+}
+
+void test_import_chromium() {
+    std::string dir = temp_path("chrome_profile");
+    std::filesystem::create_directories(dir);
+    const char* json =
+        "{\"checksum\":\"x\",\"version\":1,\"roots\":{"
+        "\"bookmark_bar\":{\"type\":\"folder\",\"name\":\"bar\",\"children\":["
+        "{\"type\":\"url\",\"name\":\"Example\",\"url\":\"https://example.com/\"," 
+        "\"date_added\":\"13350000000000000\"},"
+        "{\"type\":\"folder\",\"name\":\"F\",\"children\":["
+        "{\"type\":\"url\",\"name\":\"Second\",\"url\":\"https://second.example/\"}]},"
+        "{\"type\":\"url\",\"name\":\"Dup\",\"url\":\"https://example.com/\"}]},"
+        "\"other\":{\"type\":\"folder\",\"name\":\"other\",\"children\":[]},"
+        "\"synced\":{\"type\":\"folder\",\"name\":\"synced\",\"children\":[]}}}";
+    write_temp("chrome_profile/Bookmarks", json);
+
+    mustela::BookmarkStore store(temp_path("import_chromium.tsv"));
+    mustela::ImportReport report = mustela::import_bookmarks_chromium(dir, store);
+    CHECK(report.error.empty());
+    CHECK(report.bookmarks_added == 2);
+    CHECK(report.bookmarks_skipped == 1);
+    CHECK(store.contains("https://example.com/"));
+    CHECK(store.contains("https://second.example/"));
+    const std::vector<mustela::BookmarkEntry>& entries = store.entries();
+    CHECK(entries.size() == 2);
+    bool found_time = false;
+    for (const mustela::BookmarkEntry& entry : entries) {
+        if (entry.url == "https://example.com/") {
+            found_time = entry.title == "Example" && entry.added_at == 1705526400;
+        }
+    }
+    CHECK(found_time);
+
+    mustela::ImportReport again = mustela::import_bookmarks_chromium(dir, store);
+    CHECK(again.error.empty());
+    CHECK(again.bookmarks_added == 0);
+    CHECK(again.bookmarks_skipped == 3);
+
+    mustela::ImportReport missing = mustela::import_bookmarks_chromium(
+        temp_path("no_such_profile"), store);
+    CHECK(!missing.error.empty());
+}
+
+void test_import_firefox() {
+    std::string dir = temp_path("firefox_profile");
+    std::filesystem::create_directories(dir + "/bookmarkbackups");
+    const char* json =
+        "{\"version\":1,\"roots\":{"
+        "\"menu\":[{\"typeCode\":1,\"uri\":\"https://moz.example/\",\"title\":\"Moz\"," 
+        "\"dateAdded\":1710000000000000}],"
+        "\"toolbar\":[{\"typeCode\":2,\"title\":\"TB\",\"children\":["
+        "{\"typeCode\":1,\"uri\":\"https://tb.example/\",\"title\":\"TB page\"," 
+        "\"dateAdded\":1710000000000001}]}],"
+        "\"unfiled\":[{\"typeCode\":1,\"uri\":\"https://moz.example/\",\"title\":\"Moz\"," 
+        "\"dateAdded\":1710000000000000}],"
+        "\"mobile\":[]}}";
+    std::string blob = build_mozlz4(json);
+    write_temp("firefox_profile/bookmarkbackups/bookmarks-2025.jsonlz4", blob);
+
+    mustela::BookmarkStore store(temp_path("import_firefox.tsv"));
+    mustela::ImportReport report = mustela::import_bookmarks_firefox(dir, store);
+    CHECK(report.error.empty());
+    CHECK(report.bookmarks_added == 2);
+    CHECK(report.bookmarks_skipped == 1);
+    CHECK(store.contains("https://moz.example/"));
+    CHECK(store.contains("https://tb.example/"));
+
+    std::filesystem::create_directories(temp_path("firefox_empty_profile"));
+    mustela::BookmarkStore lonely(temp_path("import_firefox_empty.tsv"));
+    mustela::ImportReport none = mustela::import_bookmarks_firefox(
+        temp_path("firefox_empty_profile"), lonely);
+    CHECK(!none.error.empty());
+
+    std::filesystem::create_directories(temp_path("firefox_bad_profile/bookmarkbackups"));
+    write_temp("firefox_bad_profile/bookmarkbackups/bad.jsonlz4", "garbage-data!");
+    mustela::BookmarkStore bad(temp_path("import_firefox_bad.tsv"));
+    mustela::ImportReport corrupt = mustela::import_bookmarks_firefox(
+        temp_path("firefox_bad_profile"), bad);
+    CHECK(!corrupt.error.empty());
+}
+
+void test_import_html() {
+    const char* html =
+        "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n"
+        "<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n"
+        "<DL><p>\n"
+        "  <DT><A HREF=\"https://html.example/\" ADD_DATE=\"1700000000\">HTML &amp; page</A>\n"
+        "  <DT><A HREF='https://html2.example/' ADD_DATE='1700000001'>Second</A>\n"
+        "  <DT><A HREF=\"https://html.example/\">Dup</A>\n"
+        "</DL><p>\n";
+    write_temp("bookmarks.html", html);
+    mustela::BookmarkStore store(temp_path("import_html.tsv"));
+    mustela::ImportReport report = mustela::import_bookmarks_html(temp_path("bookmarks.html"), store);
+    CHECK(report.error.empty());
+    CHECK(report.bookmarks_added == 2);
+    CHECK(report.bookmarks_skipped == 1);
+    bool entity_ok = false;
+    bool quoted_ok = false;
+    for (const mustela::BookmarkEntry& entry : store.entries()) {
+        if (entry.url == "https://html.example/") {
+            entity_ok = entry.title == "HTML & page" && entry.added_at == 1700000000;
+        }
+        if (entry.url == "https://html2.example/") quoted_ok = entry.title == "Second";
+    }
+    CHECK(entity_ok);
+    CHECK(quoted_ok);
+
+    mustela::BookmarkStore empty(temp_path("import_html_missing.tsv"));
+    mustela::ImportReport error = mustela::import_bookmarks_html(
+        temp_path("no_bookmarks.html"), empty);
+    CHECK(!error.error.empty());
+}
+
+void test_import_detect() {
+    std::string home = temp_path("detect_home");
+    std::filesystem::create_directories(home + "/.config/google-chrome/Default");
+    write_temp("detect_home/.config/google-chrome/Default/Bookmarks", "{\"roots\":{}}");
+    std::filesystem::create_directories(home + "/.config/google-chrome/Skip Me");
+    std::filesystem::create_directories(home + "/.mozilla/firefox/abc.default");
+    write_temp("detect_home/.mozilla/firefox/abc.default/bookmarks.html", "<DL></DL>");
+    std::vector<mustela::DetectedProfile> found = mustela::detect_browsers_in(home);
+    CHECK(found.size() == 2);
+    bool chrome_found = false;
+    bool firefox_found = false;
+    for (const mustela::DetectedProfile& item : found) {
+        if (item.browser == "Chrome" && item.profile == "Default") chrome_found = true;
+        if (item.browser == "Firefox" && item.profile == "abc.default") firefox_found = true;
+    }
+    CHECK(chrome_found);
+    CHECK(firefox_found);
+}
+
 void test_public_surface() {
     CHECK(mustela::core_api_version() >= 1);
     CHECK(MUSTELA_CORE_API_VERSION >= 1);
@@ -2031,6 +2197,11 @@ int main() {
     test_profile_registry();
     test_autofill_store();
     test_autofill_scripts();
+    test_chrome_time();
+    test_import_chromium();
+    test_import_firefox();
+    test_import_html();
+    test_import_detect();
     test_public_surface();
 
     if (failures > 0) {

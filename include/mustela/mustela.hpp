@@ -5,6 +5,7 @@
 #include "bookmarks.hpp"
 #include "fingerprint.hpp"
 #include "history.hpp"
+#include "import.hpp"
 #include "permissions.hpp"
 #include "perf.hpp"
 #include "privacy.hpp"
