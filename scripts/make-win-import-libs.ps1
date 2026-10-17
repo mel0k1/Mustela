@@ -61,4 +61,4 @@ foreach ($name in $found) {
 }
 
 Write-Host ""
-Write-Host "import libraries written to $OutDir: $($found -join ', ')"
+Write-Host "import libraries for $($found -join ', ') written to ${OutDir}"
