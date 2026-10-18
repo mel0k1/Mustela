@@ -39,11 +39,12 @@ foreach ($name in $found) {
     }
     $symbols = @()
     foreach ($line in ($exports -split "`r?`n")) {
-        if ($line -match '^\s+\d+\s+[0-9A-Fa-f]{4,}\s+[0-9A-Fa-f]+\s+(\S+?)\s*$') {
+        if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+?)\s*$') {
             $symbols += $matches[1]
         }
     }
     if ($symbols.Count -eq 0) {
+        ($exports -split "`r?`n" | Select-Object -First 12) | ForEach-Object { Write-Host "  | $_" }
         throw "no exports parsed from $dll"
     }
     $def = Join-Path $OutDir "$name.def"
