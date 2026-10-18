@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mustela
-    VERSION 0.24.0
+    VERSION 0.24.1
     DESCRIPTION "Privacy-first, cross-platform browser engine built on WebKit"
     LANGUAGES CXX)
 
@@ -77,7 +77,7 @@ if(MUSTELA_BUILD_VIEW)
             target_include_directories(mustela_view_win PRIVATE ${MUSTELA_WEBKIT_SDK}/include)
             target_link_directories(mustela_view_win PRIVATE ${MUSTELA_WEBKIT_SDK}/lib)
             target_link_libraries(mustela_view_win PRIVATE
-                WebKit2 JavaScriptCore user32 gdi32 ole32)
+                WebKit2 JavaScriptCore user32 gdi32 ole32 uuid shell32)
             install(TARGETS mustela_view_win EXPORT mustela_targets ARCHIVE DESTINATION lib)
             export(EXPORT mustela_targets
                 FILE "${CMAKE_BINARY_DIR}/mustela-targets.cmake"

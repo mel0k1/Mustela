@@ -274,6 +274,8 @@ The SDK directory is expected to have `include/WebKit/*.h` (the C API headers fr
 
 The same SDK also builds the Windows view library (`mustela_view_win`, `src/view/win/view_win.cpp`) — the embedder surface (`include/mustela/view.hpp`) over the pinned C API; `MUSTELA_BUILD_VIEW=ON` plus `MUSTELA_WEBKIT_SDK` is all it takes.
 
+**MinGW builds.** The view library and the core compile cleanly with MinGW-w64 GCC (MSYS2 `MINGW64`), which is how the Kiwi browser CI builds the engine. Under MinGW, import libraries can be produced with `dlltool -d WebKit2.def -l libWebKit2.dll.a -m i386:x86-64`, or the linker can consume the runtime DLLs directly — either way the plain `WebKit2` / `JavaScriptCore` link names resolve from the SDK `lib/` directory. The view library additionally links `uuid` and `shell32` (`SHGetKnownFolderPath` for the downloads folder), which MSVC pulls in through its default library set.
+
 ### Running without building WebKit from source
 
 The headers pin (93 files) covers compilation; execution needs the WebKit binaries themselves. Upstream publishes both pieces and `scripts/fetch-win-runtime.ps1` assembles them into one `runtime\bin64` directory:
