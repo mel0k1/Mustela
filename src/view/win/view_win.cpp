@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#define pid_t mustela_c_api_pid_t
 #include <WebKit/WebKit2_C.h>
 #include <WebKit/WKContext.h>
 #include <WebKit/WKContextDownloadClient.h>
@@ -46,6 +47,7 @@
 #include <WebKit/WKNumber.h>
 #include <WebKit/WKArray.h>
 #include <WebKit/WKMutableArray.h>
+#undef pid_t
 
 #include "mustela/view.hpp"
 
