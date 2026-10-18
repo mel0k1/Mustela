@@ -1,8 +1,9 @@
 # make-win-import-libs.ps1 — generate MSVC import libraries from the WinCairo runtime DLLs.
 #
-# The buildbot runtime archive ships DLLs only (bin64), while linking mustela.exe /
-# mustela_view_win.lib with MSVC needs import libraries. This script extracts the
-# export tables (dumpbin), writes .def files and produces .lib files with lib.exe.
+# The buildbot runtime archive ships DLLs only, while linking mustela.exe /
+# mustela_view_win with MSVC needs import libraries. The .def files are built by
+# scripts/pe_exports.py (a dependency-free PE export directory parser — dumpbin's
+# text format proved too brittle to scrape) and lib.exe produces the .lib files.
 #
 # Usage:
 #   .\scripts\make-win-import-libs.ps1 [-RuntimeDir .\webkit-runtime\runtime\bin64] [-OutDir .\build\sdk\lib]
@@ -18,34 +19,30 @@ if (-not (Test-Path $RuntimeDir)) {
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
+$peExports = Join-Path $PSScriptRoot "pe_exports.py"
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) {
+    throw "python is required on PATH (it ships with the GitHub Windows runners)"
+}
+
 $names = @("WebKit2", "JavaScriptCore", "WebKit", "WebCore", "WTF", "PAL")
 $found = @()
 foreach ($name in $names) {
-    $dll = Join-Path $RuntimeDir "$name.dll"
-    if (Test-Path $dll) { $found += $name }
+    if (Test-Path (Join-Path $RuntimeDir "$name.dll")) { $found += $name }
 }
 if ($found.Count -eq 0) {
     throw "none of the expected WebKit runtime DLLs found in $RuntimeDir"
 }
+
 foreach ($name in $found) {
     $dll = Join-Path $RuntimeDir "$name.dll"
-    if (-not (Test-Path $dll)) {
-        Write-Host "skip $name.dll (not in runtime)"
-        continue
-    }
-    $exports = & dumpbin /nologo /exports $dll 2>&1 | Out-String
+    $listing = & python $peExports $dll
     if ($LASTEXITCODE -ne 0) {
-        throw "dumpbin failed for $dll"
+        throw "pe_exports.py failed for $dll"
     }
-    $symbols = @()
-    foreach ($line in ($exports -split "`r?`n")) {
-        if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+?)\s*$') {
-            $symbols += $matches[1]
-        }
-    }
+    $symbols = @($listing | Where-Object { $_ -and $_.Trim() -ne "" })
     if ($symbols.Count -eq 0) {
-        ($exports -split "`r?`n" | Select-Object -First 12) | ForEach-Object { Write-Host "  | $_" }
-        throw "no exports parsed from $dll"
+        throw "no exports found in $dll"
     }
     $def = Join-Path $OutDir "$name.def"
     Set-Content -Path $def -Value "LIBRARY $name"
