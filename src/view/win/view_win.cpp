@@ -941,15 +941,17 @@ WKPageRef ViewImpl::uic_create_new_page(WKPageRef, WKPageConfigurationRef, WKNav
     ViewImpl* popup = new ViewImpl(self->state, self->private_mode, ViewCallbacks{});
     popup->parent = self;
     popup->create_view();
+    if (!popup->page) {
+        // The embedder was never told about this view, so it must die here;
+        // handing out a wrapper and then deleting it would leave a dangling
+        // View* inside the embedder's tab list.
+        delete popup;
+        return nullptr;
+    }
     popup->attach();
     View* wrapper = new View(popup);
     popup->owner = wrapper;
     self->callbacks.popup_created(wrapper);
-    if (!popup->page) {
-        delete wrapper;
-        delete popup;
-        return nullptr;
-    }
     WKRetain(popup->page);
     return popup->page;
 }
@@ -989,16 +991,18 @@ void ViewImpl::uic_run_js_prompt(WKPageRef, WKStringRef message, WKStringRef def
     WKFrameRef, WKSecurityOriginRef,
     WKPageRunJavaScriptPromptResultListenerRef listener, const void* client_info) {
     ViewImpl* self = static_cast<ViewImpl*>(const_cast<void*>(client_info));
-    if (!self || !self->callbacks.script_prompt) return;
-    bool ok = true;
-    std::string text = self->callbacks.script_prompt(
-        sanitize_dialog_text(wkstring_to_std(message)),
-        default_value ? wkstring_to_std(default_value) : std::string(), ok);
-    if (!ok) return;
-    WkHold result(make_wkstring(text));
-    if (listener) {
-        WKPageRunJavaScriptPromptResultListenerCall(listener, static_cast<WKStringRef>(result.ref));
+    bool ok = false;
+    std::string text;
+    if (self && self->callbacks.script_prompt) {
+        text = self->callbacks.script_prompt(
+            sanitize_dialog_text(wkstring_to_std(message)),
+            default_value ? wkstring_to_std(default_value) : std::string(), ok);
     }
+    // The listener must always be called: WebKit blocks the page until it fires,
+    // so a missing callback still resolves as an empty (cancelled) prompt.
+    if (!listener) return;
+    WkHold result(make_wkstring(ok ? text : std::string()));
+    WKPageRunJavaScriptPromptResultListenerCall(listener, static_cast<WKStringRef>(result.ref));
 }
 
 bool ViewImpl::uic_run_before_unload(WKPageRef, WKStringRef message, WKFrameRef, const void* client_info) {
