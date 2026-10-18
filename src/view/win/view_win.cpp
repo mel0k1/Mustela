@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -40,6 +41,11 @@
 #include <WebKit/WKURLResponse.h>
 #include <WebKit/WKGeolocationPermissionRequest.h>
 #include <WebKit/WKUserMediaPermissionRequest.h>
+#include <WebKit/WKInspector.h>
+#include <WebKit/WKNotification.h>
+#include <WebKit/WKNotificationManager.h>
+#include <WebKit/WKNotificationPermissionRequest.h>
+#include <WebKit/WKNotificationProvider.h>
 #include <WebKit/WKAuthenticationChallenge.h>
 #include <WebKit/WKAuthenticationDecisionListener.h>
 #include <WebKit/WKCredential.h>
@@ -145,6 +151,36 @@ HWND hidden_host_window() {
     return host;
 }
 
+HWND parent_window_for(const ViewConfig& config) {
+    return config.parent_window
+        ? static_cast<HWND>(config.parent_window)
+        : hidden_host_window();
+}
+
+// Device scale for the view's backing store. In a DPI-unaware process this
+// reports 1.0 (no behavior change); a per-monitor-aware embedder gets crisp
+// rendering at the monitor's actual scale. Re-evaluated by apply_policies, so
+// embedders can call View::refresh_policy() after WM_DPICHANGED.
+double backing_scale_for_window(HWND window) {
+    unsigned dpi = 0;
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        using GetDpiFn = unsigned(WINAPI*)(HWND);
+        GetDpiFn get_dpi = reinterpret_cast<GetDpiFn>(
+            reinterpret_cast<void*>(GetProcAddress(user32, "GetDpiForWindow")));
+        if (get_dpi && window && IsWindow(window)) dpi = get_dpi(window);
+    }
+    if (!dpi && window) {
+        HDC dc = GetDC(window);
+        if (dc) {
+            dpi = static_cast<unsigned>(GetDeviceCaps(dc, LOGPIXELSX));
+            ReleaseDC(window, dc);
+        }
+    }
+    if (!dpi) dpi = 96;
+    return static_cast<double>(dpi) / 96.0;
+}
+
 }
 
 struct ViewImpl;
@@ -168,6 +204,7 @@ struct ViewState {
     std::map<WKDownloadRef, Download> downloads;
     std::uint64_t download_seq = 0;
     std::vector<ViewImpl*> views;
+    WKNotificationProviderV0 notification_provider = {};
 
     ViewState(const ViewConfig& c, const SessionCallbacks& cb) : config(c), callbacks(cb) {}
     ~ViewState();
@@ -289,6 +326,53 @@ void view_download_failed(WKContextRef, WKDownloadRef download, WKErrorRef, cons
 void view_download_cancelled(WKContextRef, WKDownloadRef download, const void* client_info) {
     static_cast<ViewState*>(const_cast<void*>(client_info))->handle_download_ended(download, false, true);
 }
+
+struct MhtmlSaveContext {
+    std::string path;
+    SaveCallback done;
+};
+
+void view_mhtml_saved(WKDataRef data, WKErrorRef error, void* user_data) {
+    std::unique_ptr<MhtmlSaveContext> context(static_cast<MhtmlSaveContext*>(user_data));
+    if (!context) return;
+    bool ok = false;
+    if (!error && data) {
+        size_t size = WKDataGetSize(data);
+        const unsigned char* bytes = WKDataGetBytes(data);
+        if (bytes && size && size <= 0xFFFFFFFFull) {
+            std::wstring wide = wide_dir(context->path);
+            size_t slash = wide.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) create_dir_chain(wide.substr(0, slash));
+            HANDLE file = CreateFileW(wide.c_str(), GENERIC_WRITE, 0, nullptr,
+                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file != INVALID_HANDLE_VALUE) {
+                DWORD written = 0;
+                ok = WriteFile(file, bytes, static_cast<DWORD>(size), &written, nullptr)
+                    && written == static_cast<DWORD>(size);
+                CloseHandle(file);
+            }
+        }
+    }
+    if (context->done) context->done(ok);
+}
+
+// The provider keeps no cached permission dictionary: every decision flows
+// through the UIClient permission path (site rules + prompts).
+WKDictionaryRef provider_notification_permissions(const void*) {
+    return nullptr;
+}
+
+void provider_cancel_notification(WKNotificationRef, const void*) {}
+
+void provider_did_destroy_notification(WKNotificationRef, const void*) {}
+
+void provider_add_notification_manager(WKNotificationManagerRef, const void*) {}
+
+void provider_remove_notification_manager(WKNotificationManagerRef, const void*) {}
+
+void provider_clear_notifications(WKArrayRef, const void*) {}
+
+void provider_show_notification(WKPageRef page, WKNotificationRef notification, const void* client_info);
 
 void view_fonts_filter_compiled(WKUserContentFilterRef filter, WKUserContentExtensionStoreResult result,
     void* user_data) {
@@ -425,6 +509,18 @@ void ViewState::build() {
     WKContextSetDownloadClient(context, &download_client.base);
 #pragma warning(pop)
 
+    notification_provider.base.version = 0;
+    notification_provider.base.clientInfo = this;
+    notification_provider.show = provider_show_notification;
+    notification_provider.cancel = provider_cancel_notification;
+    notification_provider.didDestroyNotification = provider_did_destroy_notification;
+    notification_provider.addNotificationManager = provider_add_notification_manager;
+    notification_provider.removeNotificationManager = provider_remove_notification_manager;
+    notification_provider.notificationPermissions = provider_notification_permissions;
+    notification_provider.clearNotifications = provider_clear_notifications;
+    WKNotificationManagerRef notifications = WKContextGetNotificationManager(context);
+    if (notifications) WKNotificationManagerSetProvider(notifications, &notification_provider.base);
+
     if (config.profile) {
         std::wstring root = wide_dir(config.profile->root());
         create_dir_chain(root);
@@ -497,6 +593,7 @@ struct ViewImpl {
     int crashes = 0;
     std::string find_query;
     double scale = 1.0;
+    double backing_scale = 0.0;
 
     ViewImpl(ViewState* s, bool priv, const ViewCallbacks& cb)
         : state(s), callbacks(cb), private_mode(priv) {}
@@ -545,6 +642,8 @@ struct ViewImpl {
         WKGeolocationPermissionRequestRef, const void* client_info);
     static void uic_decide_user_media(WKPageRef, WKFrameRef, WKSecurityOriginRef, WKSecurityOriginRef,
         WKUserMediaPermissionRequestRef, const void* client_info);
+    static void uic_decide_notification(WKPageRef, WKSecurityOriginRef,
+        WKNotificationPermissionRequestRef, const void* client_info);
     static void find_did_find_string(WKPageRef, WKStringRef, unsigned match_count, const void* client_info);
     static void find_did_fail_to_find_string(WKPageRef, WKStringRef, const void* client_info);
     static void cm_get_menu(WKPageRef, WKArrayRef proposed_menu, WKArrayRef* new_menu,
@@ -612,6 +711,13 @@ void ViewImpl::apply_policies(const std::string& uri) {
     if (decision.zoom > 0.0) {
         scale = decision.zoom;
         if (page) WKPageSetScaleFactor(page, scale, WKPointMake(0, 0));
+    }
+    if (page) {
+        double want = backing_scale_for_window(parent_window_for(state->config));
+        if (backing_scale <= 0.0 || std::fabs(want - backing_scale) > 0.001) {
+            WKPageSetCustomBackingScaleFactor(page, want);
+            backing_scale = want;
+        }
     }
 }
 
@@ -951,6 +1057,38 @@ void ViewImpl::uic_decide_user_media(WKPageRef, WKFrameRef, WKSecurityOriginRef,
     }
 }
 
+void ViewImpl::uic_decide_notification(WKPageRef, WKSecurityOriginRef,
+    WKNotificationPermissionRequestRef request, const void* client_info) {
+    ViewImpl* self = static_cast<ViewImpl*>(const_cast<void*>(client_info));
+    if (!self || !request) return;
+    const Settings* set = self->state ? self->state->config.settings : nullptr;
+    PermissionAnswer answer = self->decide_permission(
+        set ? set->permissions_notifications : std::string(), std::string(), "notifications");
+    if (answer == PermissionAnswer::Allow) {
+        WKNotificationPermissionRequestAllow(request);
+    } else {
+        WKNotificationPermissionRequestDeny(request);
+    }
+}
+
+void provider_show_notification(WKPageRef page, WKNotificationRef notification, const void* client_info) {
+    ViewState* state = static_cast<ViewState*>(const_cast<void*>(client_info));
+    if (!state || !notification) return;
+    ViewImpl* target = nullptr;
+    for (ViewImpl* view : state->views) {
+        if (view && view->page == page) {
+            target = view;
+            break;
+        }
+    }
+    if (!target || !target->callbacks.notification) return;
+    WkHold title(WKNotificationCopyTitle(notification));
+    WkHold body(WKNotificationCopyBody(notification));
+    std::string heading = title.ref ? wkstring_to_std(static_cast<WKStringRef>(title.ref)) : std::string();
+    std::string text = body.ref ? wkstring_to_std(static_cast<WKStringRef>(body.ref)) : std::string();
+    target->callbacks.notification(sanitize_dialog_text(heading, 256), sanitize_dialog_text(text, 512));
+}
+
 void ViewImpl::find_did_find_string(WKPageRef, WKStringRef, unsigned, const void* client_info) {
     ViewImpl* self = static_cast<ViewImpl*>(const_cast<void*>(client_info));
     if (self && self->callbacks.find_result) self->callbacks.find_result(true);
@@ -1001,15 +1139,16 @@ void ViewImpl::create_view() {
         content);
     WKPageConfigurationSetWebsiteDataStore(static_cast<WKPageConfigurationRef>(configuration.ref),
         state->store_for(private_mode));
-    HWND parent = state->config.parent_window
-        ? static_cast<HWND>(state->config.parent_window)
-        : hidden_host_window();
+    HWND parent = parent_window_for(state->config);
     RECT rect = {};
     view = WKViewCreate(rect, static_cast<WKPageConfigurationRef>(configuration.ref), parent);
     if (!view) return;
     WKViewSetIsInWindow(view, true);
     page = WKViewGetPage(view);
     if (page) {
+        double want = backing_scale_for_window(parent);
+        WKPageSetCustomBackingScaleFactor(page, want);
+        backing_scale = want;
         WkHold ua(WKPageCopyUserAgent(page));
         default_ua = ua.ref ? wkstring_to_std(static_cast<WKStringRef>(ua.ref)) : std::string();
     }
@@ -1053,6 +1192,7 @@ void ViewImpl::attach() {
     ui.mouseDidMoveOverElement = uic_mouse_did_move_over_element;
     ui.decidePolicyForGeolocationPermissionRequest = uic_decide_geolocation;
     ui.decidePolicyForUserMediaPermissionRequest = uic_decide_user_media;
+    ui.decidePolicyForNotificationPermissionRequest = uic_decide_notification;
     WKPageSetPageUIClient(page, &ui.base);
 
     WKPageFindClientV0 find = {};
@@ -1294,19 +1434,50 @@ void View::selected_text(const TextCallback& done) {
     if (done) done(std::string());
 }
 
-void View::execute_edit_command(EditCommand) {}
+void View::execute_edit_command(EditCommand command) {
+    if (!impl->page) return;
+    const char* name = nullptr;
+    switch (command) {
+        case EditCommand::Copy: name = "Copy"; break;
+        case EditCommand::Cut: name = "Cut"; break;
+        case EditCommand::Paste: name = "Paste"; break;
+        case EditCommand::SelectAll: name = "SelectAll"; break;
+        case EditCommand::Undo: name = "Undo"; break;
+        case EditCommand::Redo: name = "Redo"; break;
+    }
+    if (!name) return;
+    WkHold command_ref(make_wkstring(name));
+    WKPageExecuteCommand(impl->page, static_cast<WKStringRef>(command_ref.ref));
+}
 
-void View::show_devtools() {}
+void View::show_devtools() {
+    if (!impl->page) return;
+    if (impl->preferences) WKPreferencesSetDeveloperExtrasEnabled(impl->preferences, true);
+    WKInspectorRef inspector = WKPageGetInspector(impl->page);
+    if (inspector) WKInspectorShow(inspector);
+}
 
-void View::hide_devtools() {}
+void View::hide_devtools() {
+    if (!impl->page) return;
+    WKInspectorRef inspector = WKPageGetInspector(impl->page);
+    if (inspector) WKInspectorHide(inspector);
+}
 
 bool View::devtools_attached() const {
-    return false;
+    if (!impl->page) return false;
+    WKInspectorRef inspector = WKPageGetInspector(impl->page);
+    // The WinCairo inspector is always undocked; visibility is the honest
+    // analog of the GTK dock state.
+    return inspector && WKInspectorIsVisible(inspector) != 0;
 }
 
 void View::save_mhtml(const std::string& path, SaveCallback done) {
-    (void)path;
-    if (done) done(false);
+    if (!impl->page || path.empty()) {
+        if (done) done(false);
+        return;
+    }
+    auto* context = new MhtmlSaveContext{path, std::move(done)};
+    WKPageGetContentsAsMHTMLData(impl->page, context, view_mhtml_saved);
 }
 
 std::string suggested_save_name(const std::string& title, const std::string& uri) {

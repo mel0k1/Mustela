@@ -287,6 +287,8 @@ Both archives' payloads merge into `runtime\bin64` (WebKit2.dll, JavaScriptCore.
 
 CI compiles `shell_win.cpp` and `view_win.cpp` against the pinned upstream headers on every push, so the Windows sources are never farther than one commit from reality. The header set is listed in `scripts/win-headers.txt` and fetched by `scripts/fetch-win-headers.ps1`.
 
+Embedders rendering on scaled monitors: make the process per-monitor DPI aware (manifest or `SetProcessDpiAwarenessContext` before window creation) and call `View::refresh_policy()` after `WM_DPICHANGED` — the view derives the backing scale from the parent window's DPI and re-applies it automatically; in a DPI-unaware process the scale stays 1.0.
+
 Profile data on Windows lives under `%APPDATA%\mustela`: `settings.toml` and `sites.toml` at the root, `profiles\default\` for cookies, cache, storage, the compiled font filter and `perf.jsonl`. Both TOML files are watched with `ReadDirectoryChangesW` — edits apply live, same as on Linux. The perf module works identically on both ports: startup is measured to first paint (`WM_PAINT`), memory is sampled from the process tree via `GetProcessMemoryInfo`, and page loads are timed between the provisional-start and finish navigation callbacks.
 
 The only perf key that is not applied live is `perf.process_model` — the process model is fixed when the contexts are created, so changing it requires a restart.

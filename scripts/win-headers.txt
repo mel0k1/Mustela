@@ -38,10 +38,15 @@ WKGeolocationPosition.h
 WKGeometry.h
 WKHTTPCookieStoreRef.h
 WKHitTestResultRef.h
+WKInspector.h
 WKMutableArray.h
 WKMutableDictionary.h
 WKNativeEvent.h
 WKNavigationDataRef.h
+WKNotification.h
+WKNotificationManager.h
+WKNotificationPermissionRequest.h
+WKNotificationProvider.h
 WKNumber.h
 WKOpenPanelParametersRef.h
 WKOpenPanelResultListener.h

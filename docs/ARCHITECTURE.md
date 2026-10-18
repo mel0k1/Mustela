@@ -58,7 +58,7 @@ The Linux port links `webkit2gtk-4.1` through pkg-config. The Windows port links
 
 - **linux** — full GTK shell build against `webkit2gtk-4.1` (including the `mustela-webext` web-process extension module), ctest, then `mustela-bench` over the local fixture under `xvfb-run` with a generous `--max-ms` budget.
 - **windows core** — core and tests under MSVC.
-- **windows shell** — `shell_win.cpp` and `bench_win.cpp` compiled against 88 pinned upstream WebKit C API headers (`scripts/fetch-win-headers.ps1`, pinned commit in the script), so the WinCairo embedding and the Windows bench are checked against reality without building WebKit.
+- **windows shell** — `shell_win.cpp` and `bench_win.cpp` compiled against 93 pinned upstream WebKit C API headers (`scripts/fetch-win-headers.ps1`, pinned commit in the script), so the WinCairo embedding and the Windows bench are checked against reality without building WebKit.
 - **sanitizers** — the core suite rebuilt with `-fsanitize=address,undefined` and run strict (leak detection on, halt on first finding).
 - **clang-tidy** — static analysis over `src/core` with the curated `.clang-tidy` set; advisory (`continue-on-error`) until findings are burned down.
 
